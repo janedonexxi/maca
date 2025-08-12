@@ -1,209 +1,514 @@
-name: macOS Desktop with noVNC (Fixed)
+name: macOS Desktop with noVNC (Fixed Python)
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: 'VNC Password'
+        description: VNC Password
         required: false
-        default: 'github2024'
+        default: github2024
         type: string
       session_password:
-        description: 'Web Terminal Password'
+        description: Web Terminal Password
         required: false
-        default: 'github2024'
+        default: github2024
         type: string
-
 jobs:
   macos-desktop:
     runs-on: macos-latest
     timeout-minutes: 360
-    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Get System Info
-      run: |
-        PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-        echo "\U0001F310 Public IP: $PUBLIC_IP"
-        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-        echo "\U0001F5A5️  System: macOS $(sw_vers -productVersion) ($(uname -m))"
-        echo "💾f RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
-        
-    - name: Install Desktop Components (Fixed)
-      run: |
-        echo "📦 Installing desktop components..."
-        brew install node python3
-        npm install -g localtunnel
-        echo "🔧 Setting up VNC server..."
-        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on \
-          -clientopts -setvnclegacy -vnclegacy yes \
-          -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
-          -restart -agent -privs -all
-        echo "✅ VNC server configured"
-        
-    - name: Install noVNC and Websockify (Manual)
-      run: |
-        echo "\U0001F310 Installing noVNC manually..."
-        git clone https://github.com/novnc/noVNC.git /tmp/noVNC
-        cd /tmp/noVNC
-        python3 -m pip install websockify
-        curl -L https://github.com/novnc/websockify/archive/refs/heads/master.zip -o websockify.zip
-        unzip websockify.zip
-        mv websockify-master /tmp/websockify
-        echo "✅ noVNC and websockify installed"
-        
-    - name: Setup Desktop Applications
-      run: |
-        echo "📱 Installing desktop applications..."
-        brew install --cask firefox || echo "Firefox install failed, continuing..."
-        brew install --cask visual-studio-code || echo "VSCode install failed, continuing..."
-        brew install --cask sublime-text || echo "Sublime install failed, continuing..."
-        brew install htop neofetch git
-        echo "✅ Applications installed"
-        
-    - name: Configure VNC and Display
-      run: |
-        echo "\U0001F5A5️  Configuring display and VNC..."
-        mkdir -p ~/.vnc
-        echo "${{ github.event.inputs.vnc_password }}" | python3 - <<'PY' > ~/.vnc/passwd
-        import sys, crypt
-        password = sys.stdin.read().strip()
-        print(crypt.crypt(password, crypt.mksalt()))
-        PY
-        chmod 600 ~/.vnc/passwd
-        echo "🔄 VNC server should be running on port 5900"
-        
-    - name: Start noVNC Web Interface
-      run: |
-        echo "\U0001F310 Starting noVNC web interface..."
-        cd /tmp/websockify
-        python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 &
-        sleep 10
-        if pgrep -f websockify; then
-            echo "✅ Websockify process is running"
-        else
-            echo "⚠️  Websockify may not be running properly"
-        fi
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Get System Info
+        run: >
+          PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
 
-    - name: Create Custom Desktop Interface
-      run: |
-        echo "🎨 Creating custom web interface..."
-        # (HTML creation block remains unchanged from your original, with placeholders replaced)
-        # Replace placeholder
-        sed -i '' "s/PLACEHOLDER_VNC_PASS/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
-        echo "✅ Custom interface created"
-        
-    - name: Setup Web Terminal
-      run: |
-        echo "💻 Setting up web terminal..."
-        brew install ttyd
-        ttyd --port 8080 --writable /bin/bash &
-        echo "✅ Web terminal started on port 8080"
-        
-    - name: Setup Reverse Proxy
-      run: |
-        echo "🔄 Setting up nginx reverse proxy..."
-        brew install nginx
-        cat > /tmp/nginx.conf << 'EOF'
-        events { worker_connections 1024; }
-        http {
-            include /opt/homebrew/etc/nginx/mime.types;
-            default_type application/octet-stream;
-            server {
-                listen 8090;
-                location / {
-                    proxy_pass http://127.0.0.1:6080/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                    proxy_set_header Host $host;
-                }
-                location /websockify {
-                    proxy_pass http://127.0.0.1:6080/websockify;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                }
-                location /terminal {
-                    proxy_pass http://127.0.0.1:8080/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                }
-            }
-        }
-        EOF
-        nginx -c /tmp/nginx.conf &
-        echo "✅ Nginx started on port 8090"
-        
-    - name: Setup Public Access
-      run: |
-        echo "🚀 Setting up public tunnels..."
-        brew install cloudflared
-        cloudflared tunnel --url http://localhost:8090 > cloudflare.log 2>&1 &
-        sleep 20
-        CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' cloudflare.log | head -1)
-        if [ ! -z "$CF_URL" ]; then
-            echo "$CF_URL" > cloudflare_url.txt
-        fi
-        npx localtunnel --port 8090 --subdomain macos-desktop-$(date +%s) > localtunnel.log 2>&1 &
-        sleep 10
-        LT_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
-        if [ ! -z "$LT_URL" ]; then
-            echo "$LT_URL" > localtunnel_url.txt
-        fi
-        
-    - name: Display Access Information
-      run: |
-        echo ""
-        echo "🎉 macOS Desktop Environment is Ready!"
-        echo "💻  Full GUI + Terminal access via web browser"
-        echo ""
-        echo "📊 System Status:"
-        echo "• VNC Server: ✅ Running on port 5900"
-        echo "• noVNC Web: ✅ Running on port 6080" 
-        echo "• Web Terminal: ✅ Running on port 8080"
-        echo "• Nginx Proxy: ✅ Running on port 8090"
-        echo ""
-        echo "🌐 PUBLIC ACCESS:"
-        echo "================"
-        if [ -f cloudflare_url.txt ]; then
-            CF_URL=$(cat cloudflare_url.txt)
-            echo "🤏 CLOUDFLARE TUNNEL:"
-            echo "   🖥️  Desktop: $CF_URL"
-            echo "   💻 Terminal: $CF_URL/terminal"
-            echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
-            echo ""
-        fi
-        if [ -f localtunnel_url.txt ]; then
-            LT_URL=$(cat localtunnel_url.txt)
-            echo "🤏 LOCALTUNNEL:"
-            echo "   🖥️  Desktop: $LT_URL"
-            echo "   💻 Terminal: $LT_URL/terminal"
-            echo "   🔑 Tunnel Password: $PUBLIC_IP"
-            echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
-            echo ""
-        fi
-        
-    - name: Keep Services Running
-      run: |
-        echo "⏰ Keeping desktop session alive for 6 hours..."
-        while true; do
-            if ! pgrep -f websockify > /dev/null; then
-                echo "🔄 Restarting noVNC..."
-                cd /tmp/websockify
-                python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 &
-            fi
-            if ! pgrep ttyd > /dev/null; then
-                echo "🔄 Restarting terminal..."
-                ttyd --port 8080 --writable /bin/bash &
-            fi
-            if ! pgrep nginx > /dev/null; then
-                echo "🔄 Restarting proxy..."
-                nginx -c /tmp/nginx.conf &
-            fi
-            echo "$(date): ✅ Desktop services running"
-            sleep 300
-        done
+          echo "🌐 Public IP: $PUBLIC_IP"
+
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+
+
+          echo "🖥️  System: macOS $(sw_vers -productVersion) ($(uname -m))"
+
+          echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
+      - name: Install Basic Tools
+        run: |
+          echo "📦 Installing basic tools..."
+          brew install node
+          npm install -g localtunnel
+          echo "✅ Basic tools installed"
+      - name: Setup Python Virtual Environment
+        run: >
+          echo "🐍 Setting up Python virtual environment..."
+
+
+          # Create virtual environment to avoid externally-managed-environment error
+
+          python3 -m venv /tmp/venv
+
+          source /tmp/venv/bin/activate
+
+
+          # Install websockify in virtual environment
+
+          pip install websockify
+
+
+          # Make websockify globally accessible
+
+          ln -sf /tmp/venv/bin/websockify /usr/local/bin/websockify || true
+
+
+          echo "✅ Python environment setup complete"
+      - name: Setup VNC Server
+        run: >
+          echo "🔧 Setting up VNC server..."
+
+
+          # Enable macOS built-in VNC server
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
+            -restart -agent -privs -all
+
+          echo "✅ VNC server configured on port 5900"
+      - name: Install noVNC (Alternative Method)
+        run: |
+          echo "🌐 Installing noVNC..."
+
+          # Clone noVNC
+          git clone https://github.com/novnc/noVNC.git /tmp/noVNC
+
+          # Clone websockify source as backup
+          git clone https://github.com/novnc/websockify.git /tmp/websockify
+
+          # Try Homebrew websockify alternative
+          brew install websocketd || true
+
+          echo "✅ noVNC installed"
+      - name: Install Desktop Applications
+        run: |
+          echo "📱 Installing applications..."
+
+          # Install GUI applications (continue on failure)
+          brew install --cask firefox || echo "Firefox install failed"
+          brew install --cask visual-studio-code || echo "VSCode install failed"
+          brew install --cask sublime-text || echo "Sublime install failed"
+
+          # Install CLI tools
+          brew install htop neofetch git ttyd
+
+          echo "✅ Applications installed"
+      - name: Start noVNC with Multiple Methods
+        run: >
+          echo "🌐 Starting noVNC web interface..."
+
+
+          # Method 1: Try with virtual environment websockify
+
+          if [ -f /tmp/venv/bin/websockify ]; then
+              echo "🔄 Starting websockify from virtual environment..."
+              source /tmp/venv/bin/activate
+              /tmp/venv/bin/websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
+              sleep 5
+          fi
+
+
+          # Method 2: Try with websockify source
+
+          if ! pgrep -f websockify > /dev/null; then
+              echo "🔄 Starting websockify from source..."
+              cd /tmp/websockify
+              python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
+              sleep 5
+          fi
+
+
+          # Method 3: Simple HTTP server + manual VNC (fallback)
+
+          if ! pgrep -f websockify > /dev/null; then
+              echo "🔄 Starting simple HTTP server as fallback..."
+              cd /tmp/noVNC
+              python3 -m http.server 6080 > /tmp/http.log 2>&1 &
+              sleep 3
+          fi
+
+
+          if pgrep -f "websockify\|http.server" > /dev/null; then
+              echo "✅ Web interface started on port 6080"
+          else
+              echo "⚠️  Web interface startup failed"
+          fi
+      - name: Create Enhanced Web Interface
+        run: >
+          echo "🎨 Creating enhanced web interface..."
+
+
+          cat > /tmp/noVNC/index.html << 'HTMLEOF'
+
+          <!DOCTYPE html>
+
+          <html>
+
+          <head>
+              <title>🍎 macOS Desktop - GitHub Actions</title>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <style>
+                  * { margin: 0; padding: 0; box-sizing: border-box; }
+                  body { 
+                      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                      color: white; 
+                      min-height: 100vh;
+                      padding: 20px;
+                  }
+                  .container { max-width: 1400px; margin: 0 auto; }
+                  .header {
+                      text-align: center;
+                      background: rgba(255,255,255,0.15);
+                      padding: 30px;
+                      border-radius: 20px;
+                      margin-bottom: 30px;
+                      backdrop-filter: blur(10px);
+                  }
+                  .controls {
+                      display: flex;
+                      justify-content: center;
+                      gap: 15px;
+                      margin: 20px 0;
+                      flex-wrap: wrap;
+                  }
+                  .btn {
+                      padding: 15px 30px;
+                      border: none;
+                      border-radius: 12px;
+                      font-weight: 600;
+                      text-decoration: none;
+                      display: inline-block;
+                      transition: all 0.3s ease;
+                      cursor: pointer;
+                      font-size: 16px;
+                  }
+                  .btn-primary { background: #007AFF; color: white; }
+                  .btn-primary:hover { background: #0056CC; transform: translateY(-2px); }
+                  .btn-success { background: #34C759; color: white; }
+                  .btn-success:hover { background: #28A745; transform: translateY(-2px); }
+                  .btn-warning { background: #FF9500; color: white; }
+                  .btn-warning:hover { background: #E6850E; transform: translateY(-2px); }
+                  
+                  .desktop-viewer {
+                      background: rgba(0,0,0,0.2);
+                      border-radius: 15px;
+                      padding: 20px;
+                      margin: 20px 0;
+                  }
+                  .vnc-frame {
+                      width: 100%;
+                      height: 70vh;
+                      min-height: 600px;
+                      border: none;
+                      border-radius: 10px;
+                      background: #000;
+                  }
+                  .info-grid {
+                      display: grid;
+                      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                      gap: 20px;
+                      margin: 20px 0;
+                  }
+                  .info-card {
+                      background: rgba(255,255,255,0.1);
+                      padding: 25px;
+                      border-radius: 15px;
+                      backdrop-filter: blur(5px);
+                      border: 1px solid rgba(255,255,255,0.2);
+                  }
+                  .status { 
+                      display: inline-block;
+                      width: 12px;
+                      height: 12px;
+                      border-radius: 50%;
+                      background: #34C759;
+                      margin-right: 8px;
+                      animation: pulse 2s infinite;
+                  }
+                  @keyframes pulse {
+                      0%, 100% { opacity: 1; }
+                      50% { opacity: 0.5; }
+                  }
+                  .connection-info {
+                      background: rgba(52, 199, 89, 0.2);
+                      padding: 15px;
+                      border-radius: 10px;
+                      margin: 15px 0;
+                      border-left: 4px solid #34C759;
+                  }
+              </style>
+          </head>
+
+          <body>
+              <div class="container">
+                  <div class="header">
+                      <h1>🍎 macOS Desktop Environment</h1>
+                      <p>GitHub Actions Remote Desktop with noVNC</p>
+                      <div class="connection-info">
+                          <span class="status"></span>
+                          <strong>VNC Password:</strong> VNC_PASSWORD_PLACEHOLDER
+                      </div>
+                  </div>
+                  
+                  <div class="controls">
+                      <button class="btn btn-primary" onclick="connectVNC()">🖥️ Connect Desktop</button>
+                      <a href="/vnc.html?autoconnect=true&resize=scale" class="btn btn-success" target="_blank">🚀 Full Screen</a>
+                      <a href="/terminal" class="btn btn-warning" target="_blank">💻 Terminal</a>
+                      <button class="btn btn-primary" onclick="refreshVNC()">🔄 Refresh</button>
+                  </div>
+                  
+                  <div class="info-grid">
+                      <div class="info-card">
+                          <h3>🖥️ Display Settings</h3>
+                          <p><strong>Resolution:</strong> Native macOS</p>
+                          <p><strong>VNC Port:</strong> 5900</p>
+                          <p><strong>Web Port:</strong> 6080</p>
+                          <p><strong>Protocol:</strong> RFB/VNC</p>
+                      </div>
+                      <div class="info-card">
+                          <h3>📱 Installed Apps</h3>
+                          <p>🌐 Firefox Browser</p>
+                          <p>💻 Visual Studio Code</p>
+                          <p>📝 Sublime Text</p>
+                          <p>🖥️ Terminal</p>
+                          <p>📁 Finder</p>
+                      </div>
+                      <div class="info-card">
+                          <h3>⚡ System Specs</h3>
+                          <p><strong>OS:</strong> macOS 14.7.6</p>
+                          <p><strong>CPU:</strong> ARM64 (3 cores)</p>
+                          <p><strong>RAM:</strong> 7 GB</p>
+                          <p><strong>Storage:</strong> SSD</p>
+                      </div>
+                      <div class="info-card">
+                          <h3>🔧 Connection Tips</h3>
+                          <p>• Click "Connect Desktop" to start</p>
+                          <p>• Use VNC password when prompted</p>
+                          <p>• Right-click for context menus</p>
+                          <p>• Cmd+Space for Spotlight</p>
+                      </div>
+                  </div>
+                  
+                  <div class="desktop-viewer">
+                      <h3>🖥️ Desktop Viewer</h3>
+                      <iframe id="vnc-frame" class="vnc-frame" src="about:blank"></iframe>
+                  </div>
+              </div>
+              
+              <script>
+                  function connectVNC() {
+                      const frame = document.getElementById('vnc-frame');
+                      frame.src = '/vnc.html?autoconnect=true&resize=scale';
+                  }
+                  
+                  function refreshVNC() {
+                      const frame = document.getElementById('vnc-frame');
+                      frame.src = frame.src;
+                  }
+                  
+                  // Auto-connect after 3 seconds
+                  setTimeout(connectVNC, 3000);
+              </script>
+          </body>
+
+          </html>
+
+          HTMLEOF
+
+
+          # Replace password placeholder
+
+          sed -i '' "s/VNC_PASSWORD_PLACEHOLDER/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
+
+
+          echo "✅ Enhanced web interface created"
+      - name: Setup Web Terminal
+        run: |
+          echo "💻 Starting web terminal..."
+          ttyd --port 8080 --writable /bin/bash > /tmp/ttyd.log 2>&1 &
+          echo "✅ Web terminal started on port 8080"
+      - name: Setup Nginx Proxy
+        run: |
+          echo "🔄 Setting up nginx reverse proxy..."
+          brew install nginx
+
+          cat > /tmp/nginx.conf << 'NGINXEOF'
+          events { worker_connections 1024; }
+          http {
+              include /opt/homebrew/etc/nginx/mime.types;
+              default_type application/octet-stream;
+              
+              server {
+                  listen 8090;
+                  
+                  location / {
+                      proxy_pass http://127.0.0.1:6080/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection "upgrade";
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                  }
+                  
+                  location /websockify {
+                      proxy_pass http://127.0.0.1:6080/websockify;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection "upgrade";
+                  }
+                  
+                  location /terminal {
+                      proxy_pass http://127.0.0.1:8080/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection "upgrade";
+                  }
+              }
+          }
+          NGINXEOF
+
+          nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
+          echo "✅ Nginx proxy started on port 8090"
+      - name: Setup Public Access Tunnels
+        run: >
+          echo "🚀 Setting up public access tunnels..."
+
+
+          # Cloudflare tunnel
+
+          brew install cloudflared
+
+          cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflare.log 2>&1 &
+
+          sleep 25
+
+
+          CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' /tmp/cloudflare.log | head -1)
+
+          if [ ! -z "$CF_URL" ]; then
+              echo "$CF_URL" > /tmp/cloudflare_url.txt
+              echo "✅ Cloudflare tunnel: $CF_URL"
+          fi
+
+
+          # Localtunnel backup
+
+          npx localtunnel --port 8090 --subdomain macos-desktop-$(date +%s) > /tmp/localtunnel.log 2>&1 &
+
+          sleep 15
+
+
+          LT_URL=$(grep -o 'https://[^[:space:]]*' /tmp/localtunnel.log | head -1)
+
+          if [ ! -z "$LT_URL" ]; then
+              echo "$LT_URL" > /tmp/localtunnel_url.txt
+              echo "✅ Localtunnel: $LT_URL"
+          fi
+      - name: Display Complete Access Information
+        run: >
+          echo ""
+
+          echo "🎉 macOS Desktop Environment is Ready!"
+
+          echo "🖥️  Full graphical desktop + terminal access"
+
+          echo ""
+
+          echo "📊 Service Status Check:"
+
+          echo "• VNC Server: $(pgrep -f ARDAgent > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+
+          echo "• noVNC/HTTP: $(pgrep -f 'websockify\|http.server' > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+
+          echo "• Web Terminal: $(pgrep ttyd > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+
+          echo "• Nginx Proxy: $(pgrep nginx > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+
+          echo ""
+
+          echo "🌐 PUBLIC ACCESS URLS:"
+
+          echo "====================="
+
+
+          if [ -f /tmp/cloudflare_url.txt ]; then
+              CF_URL=$(cat /tmp/cloudflare_url.txt)
+              echo "🥇 CLOUDFLARE TUNNEL (RECOMMENDED):"
+              echo "   🖥️  Desktop: $CF_URL"
+              echo "   💻 Terminal: $CF_URL/terminal"
+              echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
+              echo ""
+          fi
+
+
+          if [ -f /tmp/localtunnel_url.txt ]; then
+              LT_URL=$(cat /tmp/localtunnel_url.txt)
+              echo "🥈 LOCALTUNNEL BACKUP:"
+              echo "   🖥️  Desktop: $LT_URL"
+              echo "   💻 Terminal: $LT_URL/terminal"
+              echo "   🔑 Tunnel Password: $PUBLIC_IP"
+              echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
+              echo ""
+          fi
+
+
+          echo "🎮 USAGE INSTRUCTIONS:"
+
+          echo "• Open desktop URL in web browser"
+
+          echo "• Click 'Connect Desktop' or 'Full Screen'"
+
+          echo "• Enter VNC password when prompted"
+
+          echo "• Use mouse/keyboard normally"
+
+          echo "• Access applications from dock/launchpad"
+
+          echo "• Terminal available via separate link"
+      - name: Keep All Services Running
+        run: >
+          echo ""
+
+          echo "⏰ Keeping desktop session alive for 6 hours..."
+
+          echo "🔄 Auto-monitoring and restarting services as needed"
+
+          echo ""
+
+
+          while true; do
+              # Monitor and restart services
+              if ! pgrep -f 'websockify\|http.server' > /dev/null; then
+                  echo "🔄 Restarting web interface..."
+                  if [ -f /tmp/venv/bin/websockify ]; then
+                      source /tmp/venv/bin/activate
+                      /tmp/venv/bin/websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
+                  else
+                      cd /tmp/websockify
+                      python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
+                  fi
+              fi
+              
+              if ! pgrep ttyd > /dev/null; then
+                  echo "🔄 Restarting terminal..."
+                  ttyd --port 8080 --writable /bin/bash > /tmp/ttyd.log 2>&1 &
+              fi
+              
+              if ! pgrep nginx > /dev/null; then
+                  echo "🔄 Restarting proxy..."
+                  nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
+              fi
+              
+              echo "$(date): ✅ Desktop services running | IP: $PUBLIC_IP"
+              sleep 300
+          done
