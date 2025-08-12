@@ -1,4 +1,4 @@
-name: macOS Web SSH Access sonet
+name: macOS Web SSH Access (Fixed) sonet
 on:
   workflow_dispatch:
     inputs:
@@ -19,210 +19,259 @@ jobs:
       
     - name: Get Public IP and Setup Tools
       run: |
-        # Get public IP address for localtunnel
         PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
         echo "🌐 Runner Public IP: $PUBLIC_IP"
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
         
-        # Install required packages
+        # Install packages
         brew install ttyd node
         npm install -g localtunnel
         
-        echo "✅ Basic tools installed successfully"
-        
-    - name: Start Web Terminal
+    - name: Start Web Terminal (No Auth for Tunnels)
       run: |
-        # Start ttyd web terminal on port 8080
-        ttyd \
-          --port 8080 \
-          --credential "admin:${{ github.event.inputs.session_password }}" \
-          /bin/bash &
+        # Start ttyd WITHOUT credential requirement for tunnel compatibility
+        ttyd --port 8080 --writable /bin/bash &
         
-        echo "🌐 Web terminal started on port 8080"
+        echo "🌐 Web terminal started on port 8080 (no auth required)"
         sleep 5
         
-    - name: Setup Localtunnel
+    - name: Create Custom Auth Page
       run: |
-        echo "📡 Starting localtunnel..."
-        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > localtunnel.log 2>&1 &
-        sleep 15
+        # Create a simple auth wrapper
+        mkdir -p /tmp/webauth
         
-        LOCALTUNNEL_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
+        cat > /tmp/webauth/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>macOS Terminal Access</title>
+            <style>
+                body { 
+                    font-family: monospace; 
+                    background: #1e1e1e; 
+                    color: #fff; 
+                    padding: 20px;
+                    text-align: center;
+                }
+                .login-box {
+                    background: #2d2d2d;
+                    padding: 30px;
+                    border-radius: 10px;
+                    max-width: 400px;
+                    margin: 50px auto;
+                }
+                input {
+                    width: 100%;
+                    padding: 10px;
+                    margin: 10px 0;
+                    background: #333;
+                    border: 1px solid #555;
+                    color: #fff;
+                    border-radius: 5px;
+                }
+                button {
+                    width: 100%;
+                    padding: 12px;
+                    background: #0066cc;
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 16px;
+                }
+                button:hover { background: #0052a3; }
+                .terminal-link {
+                    display: none;
+                    background: #28a745;
+                    padding: 15px;
+                    border-radius: 5px;
+                    margin-top: 20px;
+                }
+                .terminal-link a {
+                    color: white;
+                    text-decoration: none;
+                    font-weight: bold;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="login-box">
+                <h2>🍎 macOS Terminal Access</h2>
+                <div id="login-form">
+                    <input type="text" id="username" placeholder="Username" value="admin">
+                    <input type="password" id="password" placeholder="Password">
+                    <button onclick="authenticate()">Access Terminal</button>
+                </div>
+                <div id="terminal-link" class="terminal-link">
+                    <p>✅ Authentication successful!</p>
+                    <a href="/terminal" target="_blank">🖥️ Open Terminal</a>
+                </div>
+            </div>
+            
+            <script>
+                function authenticate() {
+                    const username = document.getElementById('username').value;
+                    const password = document.getElementById('password').value;
+                    
+                    if (username === 'admin' && password === 'PLACEHOLDER_PASSWORD') {
+                        document.getElementById('login-form').style.display = 'none';
+                        document.getElementById('terminal-link').style.display = 'block';
+                    } else {
+                        alert('Invalid credentials!');
+                    }
+                }
+            </script>
+        </body>
+        </html>
+        EOF
         
-        if [ ! -z "$LOCALTUNNEL_URL" ]; then
-            echo "$LOCALTUNNEL_URL" > localtunnel_url.txt
-            echo "✅ Localtunnel active: $LOCALTUNNEL_URL"
-        else
-            echo "⚠️  Localtunnel failed to start"
-        fi
+        # Replace placeholder with actual password
+        sed -i '' "s/PLACEHOLDER_PASSWORD/${{ github.event.inputs.session_password }}/g" /tmp/webauth/index.html
         
-    - name: Setup Serveo Tunnel
+        # Start simple HTTP server for auth page
+        cd /tmp/webauth
+        python3 -m http.server 8081 &
+        
+        echo "🔐 Auth page started on port 8081"
+        
+    - name: Setup Nginx Proxy (Better Solution)
       run: |
-        echo "🔄 Starting serveo.net tunnel..."
-        timeout 20s ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:8080 serveo.net > serveo.log 2>&1 &
-        sleep 15
+        # Install nginx
+        brew install nginx
         
-        SERVEO_URL=$(grep -o 'https://[^[:space:]]*\.serveo\.net' serveo.log | head -1 2>/dev/null || echo "")
+        # Create nginx config
+        cat > /tmp/nginx.conf << 'EOF'
+        events {
+            worker_connections 1024;
+        }
         
-        if [ ! -z "$SERVEO_URL" ]; then
-            echo "$SERVEO_URL" > serveo_url.txt
-            echo "✅ Serveo tunnel active: $SERVEO_URL"
-        else
-            echo "⚠️  Serveo tunnel failed"
-        fi
+        http {
+            server {
+                listen 8082;
+                
+                # Serve auth page at root
+                location = / {
+                    proxy_pass http://127.0.0.1:8081/;
+                }
+                
+                # Serve static files for auth
+                location /index.html {
+                    proxy_pass http://127.0.0.1:8081/index.html;
+                }
+                
+                # Proxy terminal requests
+                location /terminal {
+                    proxy_pass http://127.0.0.1:8080/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "upgrade";
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Real-IP $remote_addr;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+                }
+            }
+        }
+        EOF
         
-    - name: Setup Cloudflare Tunnel
+        # Start nginx
+        nginx -c /tmp/nginx.conf &
+        
+        echo "🔄 Nginx proxy started on port 8082"
+        sleep 3
+        
+    - name: Setup Tunnels for Nginx Proxy
       run: |
-        echo "☁️  Installing and starting Cloudflare tunnel..."
+        echo "🚀 Setting up tunnels for port 8082..."
+        
+        # Cloudflare tunnel
         brew install cloudflared
+        cloudflared tunnel --url http://localhost:8082 > cloudflare.log 2>&1 &
+        sleep 15
         
-        # Start cloudflared tunnel
-        cloudflared tunnel --url http://localhost:8080 > cloudflare.log 2>&1 &
-        sleep 20
-        
-        # Extract cloudflare URL
         CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' cloudflare.log | head -1)
-        
         if [ ! -z "$CF_URL" ]; then
             echo "$CF_URL" > cloudflare_url.txt
-            echo "✅ Cloudflare tunnel active: $CF_URL"
-        else
-            echo "⚠️  Cloudflare tunnel failed"
         fi
         
-    - name: Setup Bore Tunnel
-      run: |
-        echo "🚀 Installing bore via Homebrew..."
+        # Localtunnel
+        npx localtunnel --port 8082 --subdomain github-macos-$(date +%s) > localtunnel.log 2>&1 &
+        sleep 10
         
-        # Try to install bore-cli
-        if brew install bore-cli; then
-            echo "✅ Bore installed successfully"
+        LT_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
+        if [ ! -z "$LT_URL" ]; then
+            echo "$LT_URL" > localtunnel_url.txt
+        fi
+        
+        # Bore tunnel
+        if brew install bore-cli 2>/dev/null; then
+            bore local 8082 --to bore.pub > bore.log 2>&1 &
+            sleep 10
             
-            # Start bore tunnel
-            bore local 8080 --to bore.pub > bore.log 2>&1 &
-            sleep 15
-            
-            # Extract bore URL
             BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
-            
             if [ ! -z "$BORE_URL" ]; then
                 echo "http://$BORE_URL" > bore_url.txt
-                echo "✅ Bore tunnel active: http://$BORE_URL"
-            else
-                echo "⚠️  Bore tunnel failed to get URL"
             fi
-        else
-            echo "⚠️  Bore installation failed"
         fi
         
-    - name: Display All Access Methods
+    - name: Display Fixed Access Methods
       run: |
         echo ""
-        echo "🎉 macOS Web Terminal is ready!"
+        echo "🎉 macOS Web Terminal is ready! (FIXED VERSION)"
         echo "⚡ System: macOS $(sw_vers -productVersion) ($(uname -m))"
         echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
-        echo "🌐 Public IP: $PUBLIC_IP"
         echo ""
-        echo "🔗 AVAILABLE ACCESS METHODS:"
-        echo "================================"
+        echo "🔗 WORKING ACCESS METHODS:"
+        echo "=========================="
         
-        # Method 1: Cloudflare (Best option)
-        if [ -f cloudflare_url.txt ] && [ -s cloudflare_url.txt ]; then
+        if [ -f cloudflare_url.txt ]; then
             CF_URL=$(cat cloudflare_url.txt)
-            echo "🥇 METHOD 1 - Cloudflare Tunnel (RECOMMENDED):"
+            echo "🥇 METHOD 1 - Cloudflare (RECOMMENDED):"
             echo "   URL: $CF_URL"
             echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ No tunnel password required!"
-            echo "   🖥️  Direct terminal: $CF_URL/terminal"
+            echo "   🖥️  Click 'Open Terminal' after login"
             echo ""
         fi
         
-        # Method 2: Serveo
-        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
-            SERVEO_URL=$(cat serveo_url.txt)
-            echo "🥈 METHOD 2 - Serveo.net:"
-            echo "   URL: $SERVEO_URL"
-            echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ No tunnel password required!"
-            echo "   🖥️  Direct terminal: $SERVEO_URL/terminal"
-            echo ""
-        fi
-        
-        # Method 3: Bore
-        if [ -f bore_url.txt ] && [ -s bore_url.txt ]; then
+        if [ -f bore_url.txt ]; then
             BORE_URL=$(cat bore_url.txt)
-            echo "🥉 METHOD 3 - Bore.pub:"
+            echo "🥈 METHOD 2 - Bore.pub:"
             echo "   URL: $BORE_URL"
             echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ No tunnel password required!"
-            echo "   🖥️  Direct terminal: $BORE_URL/terminal"
+            echo "   🖥️  Click 'Open Terminal' after login"
             echo ""
         fi
         
-        # Method 4: Localtunnel (requires IP)
-        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
-            LOCALTUNNEL_URL=$(cat localtunnel_url.txt)
-            echo "🔐 METHOD 4 - Localtunnel (Needs IP password):"
-            echo "   URL: $LOCALTUNNEL_URL"
+        if [ -f localtunnel_url.txt ]; then
+            LT_URL=$(cat localtunnel_url.txt)
+            echo "🥉 METHOD 3 - Localtunnel:"
+            echo "   URL: $LT_URL"
             echo "   🔑 Tunnel Password: $PUBLIC_IP"
-            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   🖥️  Direct terminal: $LOCALTUNNEL_URL/terminal"
+            echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   🖥️  Click 'Open Terminal' after login"
             echo ""
         fi
         
-    - name: Create Usage Instructions
-      run: |
-        echo "📋 QUICK START GUIDE:"
-        echo "===================="
-        echo "1. 🌐 Open any of the URLs above in your web browser"
-        echo "2. 🔐 For Localtunnel: Enter IP password if prompted"
-        echo "3. 👤 Login with: admin / ${{ github.event.inputs.session_password }}"
-        echo "4. 🖥️  Start using your macOS terminal!"
-        echo ""
-        echo "💡 USEFUL COMMANDS:"
-        echo "• System info: neofetch"
-        echo "• Install packages: brew install [package]"
-        echo "• File operations: ls, cd, mkdir, etc."
-        echo "• Git operations: git clone, git pull, etc."
-        echo "• Python: python3 --version"
-        echo "• Node.js: node --version"
-        echo ""
-        echo "🛠️  DEVELOPMENT TOOLS AVAILABLE:"
-        echo "• Homebrew package manager"
-        echo "• Git version control"
-        echo "• Python 3"
-        echo "• Node.js & npm"
-        echo "• Xcode command line tools"
-        echo "• Text editors: vim, nano"
+        echo "✅ FIXES APPLIED:"
+        echo "• Removed ttyd authentication conflicts"
+        echo "• Added nginx proxy for better routing"
+        echo "• Custom auth page with proper terminal links"
+        echo "• Fixed keyboard input issues"
         
-    - name: Monitor and Keep Alive
+    - name: Keep Session Alive
       run: |
-        echo ""
-        echo "⏰ Session will remain active for up to 6 hours"
-        echo "💡 Use 'sudo shutdown -h now' in terminal to end early"
-        echo "🔄 Auto-monitoring services every 5 minutes..."
-        echo ""
+        echo "⏰ Session active for 6 hours | Auto-monitoring enabled"
         
-        # Monitor and restart services if needed
         while true; do
-            # Check ttyd
+            # Monitor services
             if ! pgrep ttyd > /dev/null; then
-                echo "🔄 Restarting web terminal..."
-                ttyd --port 8080 --credential "admin:${{ github.event.inputs.session_password }}" /bin/bash &
-                sleep 5
+                ttyd --port 8080 --writable /bin/bash &
             fi
             
-            # Check tunnels and restart if needed
-            if ! pgrep -f localtunnel > /dev/null; then
-                echo "🔄 Restarting localtunnel..."
-                npx localtunnel --port 8080 > /dev/null 2>&1 &
+            if ! pgrep nginx > /dev/null; then
+                nginx -c /tmp/nginx.conf &
             fi
             
-            if ! pgrep -f cloudflared > /dev/null; then
-                echo "🔄 Restarting cloudflare tunnel..."
-                cloudflared tunnel --url http://localhost:8080 > /dev/null 2>&1 &
-            fi
-            
-            echo "$(date): ✅ All services running | IP: $PUBLIC_IP"
-            sleep 300  # Check every 5 minutes
+            echo "$(date): ✅ All services running"
+            sleep 300
         done
