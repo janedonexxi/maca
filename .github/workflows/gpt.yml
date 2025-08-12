@@ -1,15 +1,9 @@
-name: macOS Web Terminal (tmate) Gpt
-
+name: macOS Web Terminal (ttyd + Cloudflare Tunnel) gpt
 on:
   workflow_dispatch: {}
 
-concurrency:
-  group: mac-web-terminal
-  cancel-in-progress: true
-
 jobs:
-  open_web_terminal:
-    # macos-15 GA; 'macos-latest' etiketi 4 Ağu–1 Eyl 2025'te 15'e taşınıyor.
+  mac_web_term:
     runs-on: macos-15
     timeout-minutes: 180
     permissions:
@@ -18,22 +12,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # tmate: SSH + Web terminal linki üretir
-      - name: Start tmate session (public web link)
-        id: tmate
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-          # Linke sahip herkes bağlansın (şifre/anahtar kısıtı yok)
-          limit-access-to-actor: false
-
-      # Tıklanabilir özet
-      - name: Publish connection links
-        if: ${{ always() }}
+      - name: Install ttyd & cloudflared
         run: |
-          echo "### tmate bağlantıları" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Web terminal**: ${{ steps.tmate.outputs.web-url }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **SSH (istersen)**: \`${{ steps.tmate.outputs.ssh-command }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "> Oturum, job süresi/timeout bitene kadar açık." >> "$GITHUB_STEP_SUMMARY"
+          brew update
+          brew install ttyd cloudflared
+
+      - name: Launch web terminal and expose it
+        shell: bash
+        run: |
+          # 1) Web terminali başlat (ttyd, zsh kabuğu)
+          nohup ttyd -p 7681 /bin/zsh > /tmp/ttyd.log 2>&1 &
+
+          # 2) Cloudflare Quick Tunnel ile herkese açık URL oluştur
+          nohup cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+
+          # 3) URL'yi logdan çek ve Summary'ye yaz
+          for i in {1..60}; do
+            URL=$(grep -oE 'https://[a-zA-Z0-9.-]+trycloudflare.com' /tmp/cloudflared.log | head -n1 || true)
+            if [[ -n "$URL" ]]; then
+              echo "### Web terminal" >> "$GITHUB_STEP_SUMMARY"
+              echo "$URL" >> "$GITHUB_STEP_SUMMARY"
+              echo "::notice title=Web terminal::$URL"
+              break
+            fi
+            sleep 2
+          done
+
+          # 4) Job'ı canlı tut (terminal açık kalsın)
+          tail -f /dev/null
