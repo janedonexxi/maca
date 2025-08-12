@@ -1,15 +1,9 @@
----
-name: macOS Desktop with noVNC (VNC Fixed) Sonet son
+name: macOS Desktop Alternative VNC sonnet
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
         description: VNC Password
-        required: false
-        default: github2024
-        type: string
-      session_password:
-        description: Web Terminal Password
         required: false
         default: github2024
         type: string
@@ -20,165 +14,132 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Get System Info
-        run: >
-          PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-
-          echo "🌐 Public IP: $PUBLIC_IP"
-
-          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-
-
-          echo "🖥️  System: macOS $(sw_vers -productVersion) ($(uname -m))"
-
-          echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
-      - name: Install Basic Tools
+      - name: System Setup
         run: |
-          echo "📦 Installing basic tools..."
-          brew install node
+          PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
+          echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
+          echo "🖥️  macOS $(sw_vers -productVersion) ready"
+      - name: Install Desktop Environment
+        run: |
+          echo "📦 Installing desktop components..."
+
+          # Install basic tools
+          brew install node python3
           npm install -g localtunnel
-          echo "✅ Basic tools installed"
-      - name: Setup Python Virtual Environment
-        run: >
-          echo "🐍 Setting up Python virtual environment..."
 
-
-          # Create virtual environment to avoid externally-managed-environment error
-
+          # Create Python virtual environment
           python3 -m venv /tmp/venv
+          source /tmp/venv/bin/activate
+          pip install websockify
+
+          # Install GUI applications
+          brew install --cask firefox || true
+          brew install --cask visual-studio-code || true
+
+          echo "✅ Desktop environment ready"
+      - name: Create VNC User for Authentication
+        run: |
+          echo "👤 Creating VNC user for proper authentication..."
+
+          # Create a dedicated VNC user (based on GitHub research)
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1001
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 20
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
+
+          # Set password for VNC user
+          echo "vncuser:${{ github.event.inputs.vnc_password }}" | sudo chpasswd
+
+          # Add to admin group
+          sudo dscl . -append /Groups/admin GroupMembership vncuser
+
+          # Create home directory
+          sudo createhomedir -c -u vncuser
+          sudo chown -R vncuser:staff /Users/vncuser
+
+          echo "✅ VNC user 'vncuser' created with password"
+      - name: Setup VNC Server with User Authentication
+        run: >
+          echo "🔧 Setting up VNC server with user authentication..."
+
+
+          # Enable Remote Management for the VNC user
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -configure -allowAccessFor -specifiedUsers \
+            -configure -users vncuser \
+            -configure -restart -agent \
+            -privs -all
+
+          # Enable VNC legacy connections
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }}
+
+          # Set system-wide VNC settings
+
+          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt VNCEnabled -int 1
+
+          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt Password -string "${{ github.event.inputs.vnc_password }}"
+
+
+          # Start screen sharing service
+
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+
+          echo "✅ VNC server configured with user authentication"
+      - name: Setup noVNC with Fixed Configuration
+        run: >
+          echo "🌐 Setting up noVNC..."
+
+
+          # Clone noVNC and websockify
+
+          git clone https://github.com/novnc/noVNC.git /tmp/noVNC
+
+          git clone https://github.com/novnc/websockify.git /tmp/websockify
+
+
+          # Start websockify with virtual environment
 
           source /tmp/venv/bin/activate
 
 
-          # Install websockify in virtual environment
+          # Wait for VNC server to be ready
 
-          pip install websockify
-
-
-          # Make websockify globally accessible
-
-          ln -sf /tmp/venv/bin/websockify /usr/local/bin/websockify || true
+          sleep 10
 
 
-          echo "✅ Python environment setup complete"
-      - name: Setup VNC Server (Initial)
-        run: >
-          echo "🔧 Setting up VNC server..."
+          # Try different VNC ports
+
+          for port in 5900 5901 5902; do
+              if netstat -an | grep ":$port.*LISTEN" > /dev/null; then
+                  echo "🔄 Starting websockify for VNC port $port"
+                  websockify --web /tmp/noVNC 6080 localhost:$port > /tmp/websockify.log 2>&1 &
+                  sleep 5
+                  if pgrep -f websockify > /dev/null; then
+                      echo "✅ noVNC started successfully on VNC port $port"
+                      echo "$port" > /tmp/vnc_port.txt
+                      break
+                  fi
+              fi
+          done
 
 
-          # Enable macOS built-in VNC server
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
-            -restart -agent -privs -all
-
-          echo "✅ VNC server initial setup complete"
-      - name: Fix VNC Authentication Issues
-        run: >
-          echo "🔧 Fixing VNC authentication..."
-
-
-          # Stop current VNC server
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -stop
-
-
-          # Reconfigure VNC with proper settings
-
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -restart -agent \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }}
-
-          # Enable VNC without username requirement
-
-          sudo defaults write /Library/Preferences/com.apple.RemoteDesktop.plist VNCLegacyConnectionsEnabled -bool true
-
-          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt Password -string ${{ github.event.inputs.vnc_password }}
-
-
-          # Restart VNC service
-
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-
-          sudo launchctl load /System/Library/LaunchDaemons/com.apple.screensharing.plist
-
-
-          echo "✅ VNC authentication fixed - password only mode enabled"
-      - name: Install noVNC Components
-        run: |
-          echo "🌐 Installing noVNC..."
-
-          # Clone noVNC
-          git clone https://github.com/novnc/noVNC.git /tmp/noVNC
-
-          # Clone websockify source as backup
-          git clone https://github.com/novnc/websockify.git /tmp/websockify
-
-          # Try Homebrew websockify alternative
-          brew install websocketd || true
-
-          echo "✅ noVNC components installed"
-      - name: Install Desktop Applications
-        run: |
-          echo "📱 Installing applications..."
-
-          # Install GUI applications (continue on failure)
-          brew install --cask firefox || echo "Firefox install failed"
-          brew install --cask visual-studio-code || echo "VSCode install failed"
-          brew install --cask sublime-text || echo "Sublime install failed"
-
-          # Install CLI tools
-          brew install htop neofetch git ttyd
-
-          echo "✅ Applications installed"
-      - name: Start noVNC with Multiple Methods
-        run: >
-          echo "🌐 Starting noVNC web interface..."
-
-
-          # Method 1: Try with virtual environment websockify
-
-          if [ -f /tmp/venv/bin/websockify ]; then
-              echo "🔄 Starting websockify from virtual environment..."
-              source /tmp/venv/bin/activate
-              /tmp/venv/bin/websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
-              sleep 5
-          fi
-
-
-          # Method 2: Try with websockify source
+          # Fallback: Force start websockify on port 5900
 
           if ! pgrep -f websockify > /dev/null; then
-              echo "🔄 Starting websockify from source..."
-              cd /tmp/websockify
-              python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
-              sleep 5
+              echo "🔄 Force starting websockify on port 5900..."
+              websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
           fi
-
-
-          # Method 3: Simple HTTP server + manual VNC (fallback)
-
-          if ! pgrep -f websockify > /dev/null; then
-              echo "🔄 Starting simple HTTP server as fallback..."
-              cd /tmp/noVNC
-              python3 -m http.server 6080 > /tmp/http.log 2>&1 &
-              sleep 3
-          fi
-
-
-          if pgrep -f "websockify\|http.server" > /dev/null; then
-              echo "✅ Web interface started on port 6080"
-          else
-              echo "⚠️  Web interface startup failed"
-          fi
-      - name: Create Enhanced Web Interface
+      - name: Create Enhanced VNC Interface
         run: >
-          echo "🎨 Creating enhanced web interface..."
+          echo "🎨 Creating enhanced VNC interface..."
 
 
           cat > /tmp/noVNC/index.html << 'HTMLEOF'
@@ -188,7 +149,7 @@ jobs:
           <html>
 
           <head>
-              <title>🍎 macOS Desktop - GitHub Actions</title>
+              <title>🍎 macOS VNC Desktop</title>
               <meta charset="utf-8">
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <style>
@@ -200,14 +161,21 @@ jobs:
                       min-height: 100vh;
                       padding: 20px;
                   }
-                  .container { max-width: 1400px; margin: 0 auto; }
+                  .container { max-width: 1200px; margin: 0 auto; }
                   .header {
                       text-align: center;
-                      background: rgba(255,255,255,0.15);
+                      background: rgba(255,255,255,0.1);
                       padding: 30px;
-                      border-radius: 20px;
+                      border-radius: 15px;
                       margin-bottom: 30px;
                       backdrop-filter: blur(10px);
+                  }
+                  .auth-info {
+                      background: rgba(52, 199, 89, 0.2);
+                      padding: 20px;
+                      border-radius: 10px;
+                      margin: 20px 0;
+                      border-left: 4px solid #34C759;
                   }
                   .controls {
                       display: flex;
@@ -218,21 +186,19 @@ jobs:
                   }
                   .btn {
                       padding: 15px 30px;
-                      border: none;
-                      border-radius: 12px;
-                      font-weight: 600;
+                      background: #007AFF;
+                      color: white;
                       text-decoration: none;
-                      display: inline-block;
+                      border-radius: 10px;
+                      font-weight: 600;
                       transition: all 0.3s ease;
-                      cursor: pointer;
-                      font-size: 16px;
+                      display: inline-block;
                   }
-                  .btn-primary { background: #007AFF; color: white; }
-                  .btn-primary:hover { background: #0056CC; transform: translateY(-2px); }
-                  .btn-success { background: #34C759; color: white; }
-                  .btn-success:hover { background: #28A745; transform: translateY(-2px); }
-                  .btn-warning { background: #FF9500; color: white; }
-                  .btn-warning:hover { background: #E6850E; transform: translateY(-2px); }
+                  .btn:hover { background: #0056CC; transform: translateY(-2px); }
+                  .btn-success { background: #34C759; }
+                  .btn-success:hover { background: #28A745; }
+                  .btn-warning { background: #FF9500; }
+                  .btn-warning:hover { background: #E6850E; }
                   
                   .desktop-viewer {
                       background: rgba(0,0,0,0.2);
@@ -250,43 +216,15 @@ jobs:
                   }
                   .info-grid {
                       display: grid;
-                      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
                       gap: 20px;
                       margin: 20px 0;
                   }
                   .info-card {
                       background: rgba(255,255,255,0.1);
-                      padding: 25px;
-                      border-radius: 15px;
+                      padding: 20px;
+                      border-radius: 10px;
                       backdrop-filter: blur(5px);
-                      border: 1px solid rgba(255,255,255,0.2);
-                  }
-                  .status { 
-                      display: inline-block;
-                      width: 12px;
-                      height: 12px;
-                      border-radius: 50%;
-                      background: #34C759;
-                      margin-right: 8px;
-                      animation: pulse 2s infinite;
-                  }
-                  @keyframes pulse {
-                      0%, 100% { opacity: 1; }
-                      50% { opacity: 0.5; }
-                  }
-                  .connection-info {
-                      background: rgba(52, 199, 89, 0.2);
-                      padding: 15px;
-                      border-radius: 10px;
-                      margin: 15px 0;
-                      border-left: 4px solid #34C759;
-                  }
-                  .auth-info {
-                      background: rgba(255, 159, 10, 0.2);
-                      padding: 15px;
-                      border-radius: 10px;
-                      margin: 15px 0;
-                      border-left: 4px solid #FF9F0A;
                   }
               </style>
           </head>
@@ -294,59 +232,58 @@ jobs:
           <body>
               <div class="container">
                   <div class="header">
-                      <h1>🍎 macOS Desktop Environment</h1>
-                      <p>GitHub Actions Remote Desktop with noVNC</p>
-                      <div class="connection-info">
-                          <span class="status"></span>
-                          <strong>VNC Password:</strong> VNC_PASSWORD_PLACEHOLDER
-                      </div>
+                      <h1>🍎 macOS VNC Desktop</h1>
+                      <p>GitHub Actions Remote Desktop with User Authentication</p>
+                      
                       <div class="auth-info">
-                          <strong>🔐 Authentication:</strong> Password-only mode (no username required)
+                          <h3>🔐 VNC Authentication</h3>
+                          <p><strong>Username:</strong> vncuser</p>
+                          <p><strong>Password:</strong> VNC_PASS_PLACEHOLDER</p>
+                          <p><strong>Method:</strong> User-based authentication (not password-only)</p>
                       </div>
                   </div>
                   
                   <div class="controls">
-                      <button class="btn btn-primary" onclick="connectVNC()">🖥️ Connect Desktop</button>
+                      <button class="btn" onclick="connectVNC()">🖥️ Connect Desktop</button>
                       <a href="/vnc.html?autoconnect=true&resize=scale" class="btn btn-success" target="_blank">🚀 Full Screen</a>
                       <a href="/terminal" class="btn btn-warning" target="_blank">💻 Terminal</a>
-                      <button class="btn btn-primary" onclick="refreshVNC()">🔄 Refresh</button>
+                      <button class="btn" onclick="refreshVNC()">🔄 Refresh</button>
                   </div>
                   
                   <div class="info-grid">
                       <div class="info-card">
-                          <h3>🖥️ Display Settings</h3>
-                          <p><strong>Resolution:</strong> Native macOS</p>
-                          <p><strong>VNC Port:</strong> 5900</p>
-                          <p><strong>Web Port:</strong> 6080</p>
-                          <p><strong>Protocol:</strong> RFB/VNC</p>
+                          <h3>🔧 Connection Steps</h3>
+                          <p>1. Click "Connect Desktop"</p>
+                          <p>2. Enter username: <strong>vncuser</strong></p>
+                          <p>3. Enter password: <strong>VNC_PASS_PLACEHOLDER</strong></p>
+                          <p>4. Wait for desktop to load</p>
                       </div>
                       <div class="info-card">
-                          <h3>🔐 Connection Guide</h3>
-                          <p><strong>Username:</strong> Leave blank or use 'admin'</p>
-                          <p><strong>Password:</strong> VNC_PASSWORD_PLACEHOLDER</p>
-                          <p><strong>Method:</strong> Password-only authentication</p>
-                          <p><strong>Legacy VNC:</strong> Enabled</p>
-                      </div>
-                      <div class="info-card">
-                          <h3>📱 Installed Apps</h3>
+                          <h3>📱 Available Apps</h3>
                           <p>🌐 Firefox Browser</p>
                           <p>💻 Visual Studio Code</p>
-                          <p>📝 Sublime Text</p>
                           <p>🖥️ Terminal</p>
                           <p>📁 Finder</p>
+                          <p>🛠️ System Preferences</p>
                       </div>
                       <div class="info-card">
-                          <h3>⚡ System Specs</h3>
+                          <h3>⚡ System Info</h3>
                           <p><strong>OS:</strong> macOS 14.7.6</p>
                           <p><strong>CPU:</strong> ARM64 (3 cores)</p>
                           <p><strong>RAM:</strong> 7 GB</p>
-                          <p><strong>Storage:</strong> SSD</p>
+                          <p><strong>VNC Port:</strong> 5900</p>
+                      </div>
+                      <div class="info-card">
+                          <h3>💡 Tips</h3>
+                          <p>• Use dedicated VNC user account</p>
+                          <p>• Right-click for context menus</p>
+                          <p>• Cmd+Space for Spotlight</p>
+                          <p>• Full keyboard/mouse support</p>
                       </div>
                   </div>
                   
                   <div class="desktop-viewer">
                       <h3>🖥️ Desktop Viewer</h3>
-                      <p><strong>💡 Tip:</strong> If authentication fails, leave username blank and use only password</p>
                       <iframe id="vnc-frame" class="vnc-frame" src="about:blank"></iframe>
                   </div>
               </div>
@@ -374,18 +311,19 @@ jobs:
 
           # Replace password placeholder
 
-          sed -i '' "s/VNC_PASSWORD_PLACEHOLDER/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
+          sed -i '' "s/VNC_PASS_PLACEHOLDER/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
 
 
-          echo "✅ Enhanced web interface created with auth guide"
+          echo "✅ Enhanced VNC interface created"
       - name: Setup Web Terminal
         run: |
-          echo "💻 Starting web terminal..."
+          echo "💻 Setting up web terminal..."
+          brew install ttyd
           ttyd --port 8080 --writable /bin/bash > /tmp/ttyd.log 2>&1 &
           echo "✅ Web terminal started on port 8080"
       - name: Setup Nginx Proxy
         run: |
-          echo "🔄 Setting up nginx reverse proxy..."
+          echo "🔄 Setting up nginx proxy..."
           brew install nginx
 
           cat > /tmp/nginx.conf << 'NGINXEOF'
@@ -403,7 +341,6 @@ jobs:
                       proxy_set_header Upgrade $http_upgrade;
                       proxy_set_header Connection "upgrade";
                       proxy_set_header Host $host;
-                      proxy_set_header X-Real-IP $remote_addr;
                   }
                   
                   location /websockify {
@@ -425,7 +362,7 @@ jobs:
 
           nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
           echo "✅ Nginx proxy started on port 8090"
-      - name: Setup Public Access Tunnels
+      - name: Setup Public Tunnels
         run: >
           echo "🚀 Setting up public access tunnels..."
 
@@ -449,7 +386,7 @@ jobs:
 
           # Localtunnel backup
 
-          npx localtunnel --port 8090 --subdomain macos-desktop-$(date +%s) > /tmp/localtunnel.log 2>&1 &
+          npx localtunnel --port 8090 --subdomain macos-vnc-$(date +%s) > /tmp/localtunnel.log 2>&1 &
 
           sleep 15
 
@@ -460,86 +397,105 @@ jobs:
               echo "$LT_URL" > /tmp/localtunnel_url.txt
               echo "✅ Localtunnel: $LT_URL"
           fi
-      - name: Display Complete Access Information
+      - name: Debug VNC Status
         run: >
           echo ""
 
-          echo "🎉 macOS Desktop Environment is Ready!"
+          echo "🔍 VNC Server Debug Information:"
 
-          echo "🖥️  Full graphical desktop + terminal access"
+          echo "================================"
 
-          echo ""
 
-          echo "📊 Service Status Check:"
+          # Check VNC processes
 
-          echo "• VNC Server: $(pgrep -f ARDAgent > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+          echo "VNC Processes:"
 
-          echo "• noVNC/HTTP: $(pgrep -f 'websockify\|http.server' > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-
-          echo "• Web Terminal: $(pgrep ttyd > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-
-          echo "• Nginx Proxy: $(pgrep nginx > /dev/null && echo '✅ Running' || echo '❌ Not running')"
+          ps aux | grep -i vnc || echo "No VNC processes found"
 
           echo ""
 
-          echo "🔐 VNC AUTHENTICATION INFO:"
 
-          echo "• Username: Leave BLANK or use 'admin'"
+          # Check listening ports
 
+          echo "Listening Ports:"
+
+          netstat -an | grep LISTEN | grep -E ":(590[0-9]|5900)" || echo "No VNC ports listening"
+
+          echo ""
+
+
+          # Check screen sharing
+
+          echo "Screen Sharing Status:"
+
+          sudo launchctl list | grep screensharing || echo "Screen sharing not found"
+
+          echo ""
+
+
+          # Check VNC user
+
+          echo "VNC User Status:"
+
+          id vncuser 2>/dev/null || echo "VNC user not found"
+
+          echo ""
+
+
+          # Check websockify
+
+          echo "Websockify Status:"
+
+          pgrep -f websockify > /dev/null && echo "✅ Running" || echo "❌ Not running"
+
+
+          if [ -f /tmp/websockify.log ]; then
+              echo "Websockify Log:"
+              tail -5 /tmp/websockify.log
+          fi
+      - name: Display Access Information
+        run: |
+          echo ""
+          echo "🎉 macOS VNC Desktop is Ready!"
+          echo "🖥️  Full graphical desktop with user authentication"
+          echo ""
+          echo "🔐 VNC AUTHENTICATION:"
+          echo "• Username: vncuser"
           echo "• Password: ${{ github.event.inputs.vnc_password }}"
-
-          echo "• Mode: Password-only (no username required)"
-
-          echo "• Legacy VNC: Enabled for compatibility"
-
+          echo "• Method: User-based authentication (not password-only)"
           echo ""
-
-          echo "🌐 PUBLIC ACCESS URLS:"
-
-          echo "====================="
-
+          echo "🌐 ACCESS URLS:"
+          echo "=============="
 
           if [ -f /tmp/cloudflare_url.txt ]; then
               CF_URL=$(cat /tmp/cloudflare_url.txt)
-              echo "🥇 CLOUDFLARE TUNNEL (RECOMMENDED):"
+              echo "🥇 CLOUDFLARE TUNNEL:"
               echo "   🖥️  Desktop: $CF_URL"
               echo "   💻 Terminal: $CF_URL/terminal"
-              echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
               echo ""
           fi
-
 
           if [ -f /tmp/localtunnel_url.txt ]; then
               LT_URL=$(cat /tmp/localtunnel_url.txt)
-              echo "🥈 LOCALTUNNEL BACKUP:"
+              echo "🥈 LOCALTUNNEL:"
               echo "   🖥️  Desktop: $LT_URL"
               echo "   💻 Terminal: $LT_URL/terminal"
               echo "   🔑 Tunnel Password: $PUBLIC_IP"
-              echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
               echo ""
           fi
 
-
           echo "🎮 USAGE INSTRUCTIONS:"
-
           echo "• Open desktop URL in web browser"
-
-          echo "• Click 'Connect Desktop' or 'Full Screen'"
-
-          echo "• When prompted for credentials:"
-
-          echo "  - Username: LEAVE BLANK or type 'admin'"
-
-          echo "  - Password: ${{ github.event.inputs.vnc_password }}"
-
+          echo "• Click 'Connect Desktop' button"
+          echo "• Enter username: vncuser"
+          echo "• Enter password: ${{ github.event.inputs.vnc_password }}"
+          echo "• Wait for macOS desktop to load"
           echo "• Use mouse/keyboard normally"
-
-          echo "• Access applications from dock/launchpad"
-      - name: Keep All Services Running
+      - name: Keep Services Running
         run: >
           echo ""
 
-          echo "⏰ Keeping desktop session alive for 6 hours..."
+          echo "⏰ Keeping VNC desktop session alive for 6 hours..."
 
           echo "🔄 Auto-monitoring and restarting services as needed"
 
@@ -548,15 +504,11 @@ jobs:
 
           while true; do
               # Monitor and restart services
-              if ! pgrep -f 'websockify\|http.server' > /dev/null; then
-                  echo "🔄 Restarting web interface..."
-                  if [ -f /tmp/venv/bin/websockify ]; then
-                      source /tmp/venv/bin/activate
-                      /tmp/venv/bin/websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
-                  else
-                      cd /tmp/websockify
-                      python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
-                  fi
+              if ! pgrep -f websockify > /dev/null; then
+                  echo "🔄 Restarting websockify..."
+                  source /tmp/venv/bin/activate
+                  cd /tmp/websockify
+                  websockify --web /tmp/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 &
               fi
               
               if ! pgrep ttyd > /dev/null; then
@@ -565,10 +517,10 @@ jobs:
               fi
               
               if ! pgrep nginx > /dev/null; then
-                  echo "🔄 Restarting proxy..."
+                  echo "🔄 Restarting nginx..."
                   nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
               fi
               
-              echo "$(date): ✅ Desktop services running | IP: $PUBLIC_IP"
+              echo "$(date): ✅ VNC desktop services running | IP: $PUBLIC_IP"
               sleep 300
           done
