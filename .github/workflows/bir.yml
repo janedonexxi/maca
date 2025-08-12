@@ -1,157 +1,61 @@
-name: macOS Web SSH Access Sonet
-on:
-  workflow_dispatch:
-    inputs:
-      session_password:
-        description: 'Web Terminal Password'
-        required: false
-        default: 'github2024'
-        type: string
-
-jobs:
-  macos-web-ssh:
-    runs-on: macos-latest
-    timeout-minutes: 360
+- name: Setup Multiple Tunnel Options (Fixed) sonnet
+  run: |
+    echo "🚀 Setting up tunnel options..."
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Get Public IP and Setup Tools
-      run: |
-        # Get public IP address for localtunnel
-        PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-        echo "🌐 Runner Public IP: $PUBLIC_IP"
-        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-        
-        # Install required packages
-        brew install ttyd node
-        npm install -g localtunnel
-        
-        echo "✅ Tools installed successfully"
-        
-    - name: Start Web Terminal
-      run: |
-        # Start ttyd web terminal on port 8080
-        ttyd \
-          --port 8080 \
-          --credential "admin:${{ github.event.inputs.session_password }}" \
-          /bin/bash &
-        
-        echo "🌐 Web terminal started on port 8080"
-        sleep 5
-        
-    - name: Create Multiple Tunnel Options
-      run: |
-        echo "🚀 Setting up multiple tunnel options..."
-        
-        # Option 1: Localtunnel (requires IP password)
-        echo "📡 Starting localtunnel..."
-        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > localtunnel.log 2>&1 &
+    # Method 1: Install bore via Homebrew (more reliable)
+    echo "📦 Installing bore via Homebrew..."
+    brew install bore-cli
+    
+    # Start bore tunnel
+    echo "🔄 Starting bore tunnel..."
+    bore local 8080 --to bore.pub > bore.log 2>&1 &
+    sleep 15
+    
+    # Extract bore URL
+    BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
+    
+    if [ ! -z "$BORE_URL" ]; then
+        echo "🚀 METHOD 1 - Bore.pub:"
+        echo "   URL: http://$BORE_URL"
+        echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
+        echo "   ✅ No tunnel password required!"
+        echo "$BORE_URL" > bore_url.txt
+    else
+        echo "⚠️  Bore tunnel failed, trying alternatives..."
+    fi
+    
+    # Method 2: Try cloudflared tunnel
+    echo "🌐 Setting up Cloudflare tunnel as backup..."
+    brew install cloudflared
+    
+    # Start cloudflared tunnel
+    cloudflared tunnel --url http://localhost:8080 > cloudflare.log 2>&1 &
+    sleep 15
+    
+    # Extract cloudflare URL
+    CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' cloudflare.log | head -1)
+    
+    if [ ! -z "$CF_URL" ]; then
+        echo "☁️  METHOD 2 - Cloudflare Tunnel:"
+        echo "   URL: $CF_URL"
+        echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
+        echo "   ✅ No tunnel password required!"
+        echo "$CF_URL" > cloudflare_url.txt
+    fi
+    
+    # Method 3: Try ngrok alternative - zrok
+    echo "🔗 Setting up zrok tunnel..."
+    curl -sSLf https://get.openziti.io/tun/install.sh | bash
+    
+    if command -v zrok &> /dev/null; then
+        zrok share public http://localhost:8080 > zrok.log 2>&1 &
         sleep 10
         
-        LOCALTUNNEL_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
-        
-        # Option 2: Try serveo.net (no password needed)
-        echo "🔄 Starting serveo.net tunnel..."
-        timeout 15s ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:8080 serveo.net > serveo.log 2>&1 &
-        sleep 10
-        
-        SERVEO_URL=$(grep -o 'https://[^[:space:]]*\.serveo\.net' serveo.log | head -1 2>/dev/null || echo "")
-        
-        # Save URLs
-        echo "$LOCALTUNNEL_URL" > localtunnel_url.txt
-        echo "$SERVEO_URL" > serveo_url.txt
-        
-    - name: Display All Access Methods
-      run: |
-        echo "🎉 macOS Web Terminal is ready!"
-        echo "⚡ System: macOS $(sw_vers -productVersion) ($(uname -m))"
-        echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
-        echo ""
-        
-        # Method 1: Localtunnel
-        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
-            LOCALTUNNEL_URL=$(cat localtunnel_url.txt)
-            echo "🔗 METHOD 1 - Localtunnel:"
-            echo "   URL: $LOCALTUNNEL_URL"
-            echo "   🔐 Tunnel Password: $PUBLIC_IP"
+        ZROK_URL=$(grep -o 'https://[^[:space:]]*' zrok.log | head -1)
+        if [ ! -z "$ZROK_URL" ]; then
+            echo "🔗 METHOD 3 - Zrok Tunnel:"
+            echo "   URL: $ZROK_URL"
             echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-            echo ""
+            echo "   ✅ No registration required!"
         fi
-        
-        # Method 2: Serveo.net
-        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
-            SERVEO_URL=$(cat serveo_url.txt)
-            echo "🌟 METHOD 2 - Serveo.net (RECOMMENDED - No tunnel password!):"
-            echo "   URL: $SERVEO_URL"
-            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ Direct access - no tunnel password needed!"
-            echo ""
-        fi
-        
-        # Method 3: Backup using bore.pub
-        echo "🔄 METHOD 3 - Setting up bore.pub as backup..."
-        
-    - name: Setup Bore Tunnel as Backup
-      run: |
-        # Install and use bore.pub as third option
-        curl -L https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-apple-darwin.tar.gz -o bore.tar.gz 2>/dev/null || curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-aarch64-apple-darwin.tar.gz -o bore.tar.gz
-        tar -xzf bore.tar.gz
-        chmod +x bore
-        
-        # Start bore tunnel
-        ./bore local 8080 --to bore.pub > bore.log 2>&1 &
-        sleep 10
-        
-        BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
-        
-        if [ ! -z "$BORE_URL" ]; then
-            echo "🚀 METHOD 3 - Bore.pub:"
-            echo "   URL: http://$BORE_URL"
-            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ No tunnel password required!"
-        fi
-        
-    - name: Final Access Summary
-      run: |
-        echo ""
-        echo "📋 QUICK ACCESS SUMMARY:"
-        echo "========================"
-        
-        # Show all available methods
-        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
-            echo "🥇 BEST OPTION (No passwords):"
-            echo "   $(cat serveo_url.txt)"
-        fi
-        
-        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
-            echo ""
-            echo "🥈 ALTERNATIVE (Needs IP password):"
-            echo "   $(cat localtunnel_url.txt)"
-            echo "   Password: $PUBLIC_IP"
-        fi
-        
-        echo ""
-        echo "🔐 Web Terminal Credentials (for all methods):"
-        echo "   Username: admin"
-        echo "   Password: ${{ github.event.inputs.session_password }}"
-        
-    - name: Keep Session Alive
-      run: |
-        echo ""
-        echo "⏰ Session will remain active for up to 6 hours"
-        echo "💡 Use 'sudo shutdown -h now' in terminal to end early"
-        echo ""
-        
-        # Monitor and restart services if needed
-        while true; do
-            # Check ttyd
-            if ! pgrep ttyd > /dev/null; then
-                echo "🔄 Restarting web terminal..."
-                ttyd --port 8080 --credential "admin:${{ github.event.inputs.session_password }}" /bin/bash &
-            fi
-            
-            echo "$(date): ✅ Web terminal active | IP: $PUBLIC_IP"
-            sleep 300  # Check every 5 minutes
-        done
+    fi
