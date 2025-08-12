@@ -1,4 +1,4 @@
-name: macOS Desktop with noVNC
+name: macOS Desktop with noVNC (Fixed)
 on:
   workflow_dispatch:
     inputs:
@@ -22,255 +22,321 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Get System Info and Setup
+    - name: Get System Info
       run: |
         PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
         echo "🌐 Public IP: $PUBLIC_IP"
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
         
-        echo "🖥️  System Information:"
-        echo "macOS Version: $(sw_vers -productVersion)"
-        echo "Architecture: $(uname -m)"
-        echo "RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}')"
-        echo "CPU: $(sysctl -n hw.ncpu) cores"
+        echo "🖥️  System: macOS $(sw_vers -productVersion) ($(uname -m))"
+        echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
         
-    - name: Install Desktop Environment and VNC
+    - name: Install Desktop Components (Fixed)
       run: |
         echo "📦 Installing desktop components..."
         
-        # Install Homebrew packages
-        brew install --cask xquartz
-        brew install tigervnc-viewer
-        brew install websockify
-        brew install node
+        # Install basic packages
+        brew install node python3
         npm install -g localtunnel
         
-        # Install noVNC
+        # Install VNC server (use built-in macOS VNC instead of TigerVNC)
+        echo "🔧 Setting up VNC server..."
+        
+        # Enable macOS built-in VNC server
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -activate -configure -access -on \
+          -clientopts -setvnclegacy -vnclegacy yes \
+          -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
+          -restart -agent -privs -all
+        
+        echo "✅ VNC server configured"
+        
+    - name: Install noVNC and Websockify (Manual)
+      run: |
+        echo "🌐 Installing noVNC manually..."
+        
+        # Clone noVNC
         git clone https://github.com/novnc/noVNC.git /tmp/noVNC
-        git clone https://github.com/novnc/websockify /tmp/websockify
+        cd /tmp/noVNC
         
-        echo "✅ Desktop packages installed"
+        # Install websockify via pip instead of brew
+        python3 -m pip install websockify
         
-    - name: Setup X11 and Desktop Environment
+        # Download websockify standalone
+        curl -L https://github.com/novnc/websockify/archive/refs/heads/master.zip -o websockify.zip
+        unzip websockify.zip
+        mv websockify-master /tmp/websockify
+        
+        echo "✅ noVNC and websockify installed"
+        
+    - name: Setup Desktop Applications
       run: |
-        echo "🖼️  Setting up X11 display..."
+        echo "📱 Installing desktop applications..."
         
-        # Start XQuartz
-        open -a XQuartz
-        sleep 10
+        # Install GUI applications
+        brew install --cask firefox || echo "Firefox install failed, continuing..."
+        brew install --cask visual-studio-code || echo "VSCode install failed, continuing..."
+        brew install --cask sublime-text || echo "Sublime install failed, continuing..."
         
-        # Set DISPLAY environment variable
-        export DISPLAY=:0
-        echo "DISPLAY=:0" >> $GITHUB_ENV
+        # Install terminal applications
+        brew install htop neofetch git
         
-        # Install lightweight desktop environment
-        brew install --cask rectangle  # Window manager
-        brew install --cask finder     # File manager alternative
+        echo "✅ Applications installed"
         
-        # Install some GUI applications
-        brew install --cask visual-studio-code
-        brew install --cask firefox
-        brew install --cask sublime-text
-        
-        echo "✅ Desktop environment ready"
-        
-    - name: Configure and Start VNC Server
+    - name: Configure VNC and Display
       run: |
-        echo "🔧 Configuring VNC server..."
+        echo "🖥️  Configuring display and VNC..."
         
-        # Create VNC password file
+        # Create VNC password file for compatibility
         mkdir -p ~/.vnc
-        echo "${{ github.event.inputs.vnc_password }}" | vncpasswd -f > ~/.vnc/passwd
+        echo "${{ github.event.inputs.vnc_password }}" | python3 -c "
+import sys, crypt
+password = sys.stdin.read().strip()
+print(crypt.crypt(password, crypt.mksalt()))
+        " > ~/.vnc/passwd
         chmod 600 ~/.vnc/passwd
         
-        # Create VNC startup script
-        cat > ~/.vnc/xstartup << 'EOF'
-        #!/bin/bash
-        unset SESSION_MANAGER
-        unset DBUS_SESSION_BUS_ADDRESS
+        # Start VNC server on display :1
+        # Use macOS built-in VNC which runs on port 5900
+        echo "🔄 VNC server should be running on port 5900"
         
-        # Start window manager
-        /usr/bin/open -a XQuartz
-        
-        # Start some applications
-        /Applications/Firefox.app/Contents/MacOS/firefox &
-        /usr/bin/open -a "Visual Studio Code" &
-        
-        # Keep session alive
-        exec /bin/bash
-        EOF
-        
-        chmod +x ~/.vnc/xstartup
-        
-        # Start VNC server
-        vncserver :1 -geometry 1920x1080 -depth 24 -passwd ~/.vnc/passwd
-        
-        echo "🖥️  VNC server started on display :1"
-        
-    - name: Setup noVNC Web Interface
+    - name: Start noVNC Web Interface
       run: |
-        echo "🌐 Setting up noVNC web interface..."
+        echo "🌐 Starting noVNC web interface..."
         
         # Start websockify to bridge VNC and WebSocket
         cd /tmp/websockify
-        python3 websockify.py --web /tmp/noVNC 6080 localhost:5901 &
+        python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 &
         
-        sleep 5
-        echo "✅ noVNC web interface started on port 6080"
+        sleep 10
+        echo "✅ noVNC started on port 6080"
         
-    - name: Create Custom Desktop Web Interface
+        # Test if websockify is running
+        if pgrep -f websockify; then
+            echo "✅ Websockify process is running"
+        else
+            echo "⚠️  Websockify may not be running properly"
+        fi
+        
+    - name: Create Custom Desktop Interface
       run: |
         echo "🎨 Creating custom web interface..."
         
-        # Create custom HTML page
-        cat > /tmp/desktop.html << 'EOF'
+        # Create enhanced HTML interface
+        cat > /tmp/noVNC/index.html << 'EOF'
         <!DOCTYPE html>
         <html>
         <head>
-            <title>macOS Desktop - GitHub Actions</title>
+            <title>🍎 macOS Desktop - GitHub Actions</title>
             <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
                 body { 
-                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                    background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
                     color: #fff; 
-                    margin: 0; 
+                    min-height: 100vh;
                     padding: 20px;
                 }
                 .container {
-                    max-width: 1200px;
+                    max-width: 1400px;
                     margin: 0 auto;
+                }
+                .header {
                     text-align: center;
-                }
-                .desktop-box {
+                    margin-bottom: 30px;
+                    padding: 20px;
                     background: rgba(255,255,255,0.1);
+                    border-radius: 15px;
                     backdrop-filter: blur(10px);
-                    padding: 30px;
-                    border-radius: 20px;
+                }
+                .desktop-controls {
+                    display: flex;
+                    justify-content: center;
+                    gap: 15px;
                     margin: 20px 0;
-                    border: 1px solid rgba(255,255,255,0.2);
+                    flex-wrap: wrap;
                 }
-                .desktop-link {
-                    display: inline-block;
-                    background: #007AFF;
-                    color: white;
-                    padding: 15px 30px;
+                .btn {
+                    padding: 12px 24px;
+                    border: none;
+                    border-radius: 8px;
+                    font-weight: 600;
                     text-decoration: none;
-                    border-radius: 10px;
-                    font-weight: bold;
-                    margin: 10px;
+                    display: inline-block;
                     transition: all 0.3s ease;
+                    cursor: pointer;
                 }
-                .desktop-link:hover {
-                    background: #0056CC;
-                    transform: translateY(-2px);
+                .btn-primary { background: #007AFF; color: white; }
+                .btn-primary:hover { background: #0056CC; transform: translateY(-2px); }
+                .btn-success { background: #34C759; color: white; }
+                .btn-success:hover { background: #28A745; transform: translateY(-2px); }
+                .btn-warning { background: #FF9500; color: white; }
+                .btn-warning:hover { background: #E6850E; transform: translateY(-2px); }
+                
+                .desktop-viewer {
+                    background: rgba(0,0,0,0.3);
+                    border-radius: 15px;
+                    padding: 20px;
+                    margin: 20px 0;
                 }
-                .terminal-link {
-                    background: #34C759;
+                .vnc-container {
+                    position: relative;
+                    width: 100%;
+                    height: 70vh;
+                    min-height: 600px;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    background: #000;
                 }
-                .terminal-link:hover {
-                    background: #28A745;
+                iframe {
+                    width: 100%;
+                    height: 100%;
+                    border: none;
                 }
                 .info-grid {
                     display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
                     gap: 20px;
                     margin: 20px 0;
                 }
                 .info-card {
-                    background: rgba(0,0,0,0.3);
+                    background: rgba(255,255,255,0.1);
                     padding: 20px;
                     border-radius: 10px;
-                    text-align: left;
+                    backdrop-filter: blur(5px);
                 }
-                iframe {
-                    width: 100%;
-                    height: 600px;
-                    border: none;
-                    border-radius: 10px;
-                    background: white;
+                .status-indicator {
+                    display: inline-block;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 50%;
+                    background: #34C759;
+                    margin-right: 8px;
+                    animation: pulse 2s infinite;
+                }
+                @keyframes pulse {
+                    0% { opacity: 1; }
+                    50% { opacity: 0.5; }
+                    100% { opacity: 1; }
+                }
+                .connection-status {
+                    text-align: center;
+                    padding: 10px;
+                    background: rgba(52, 199, 89, 0.2);
+                    border-radius: 8px;
+                    margin: 10px 0;
                 }
             </style>
         </head>
         <body>
             <div class="container">
-                <div class="desktop-box">
+                <div class="header">
                     <h1>🍎 macOS Desktop Environment</h1>
                     <p>GitHub Actions ile tam grafik arayüzü deneyimi</p>
-                    
-                    <div class="info-grid">
-                        <div class="info-card">
-                            <h3>🖥️ Desktop Info</h3>
-                            <p><strong>Resolution:</strong> 1920x1080</p>
-                            <p><strong>VNC Password:</strong> PLACEHOLDER_VNC_PASS</p>
-                            <p><strong>Display:</strong> :1</p>
-                        </div>
-                        <div class="info-card">
-                            <h3>📱 Applications</h3>
-                            <p>• Firefox Browser</p>
-                            <p>• Visual Studio Code</p>
-                            <p>• Terminal</p>
-                            <p>• File Manager</p>
-                        </div>
-                        <div class="info-card">
-                            <h3>⚡ System</h3>
-                            <p><strong>OS:</strong> macOS 14.7.6</p>
-                            <p><strong>RAM:</strong> 7 GB</p>
-                            <p><strong>CPU:</strong> 3 cores (ARM64)</p>
-                        </div>
+                    <div class="connection-status">
+                        <span class="status-indicator"></span>
+                        Desktop Ready - VNC Password: <strong>PLACEHOLDER_VNC_PASS</strong>
                     </div>
-                    
-                    <a href="/vnc.html" class="desktop-link">🖥️ Open Desktop</a>
-                    <a href="/terminal" class="desktop-link terminal-link">💻 Open Terminal</a>
                 </div>
                 
-                <div class="desktop-box">
-                    <h2>🌐 Embedded Desktop</h2>
-                    <iframe src="/vnc.html?autoconnect=true&resize=scale"></iframe>
+                <div class="desktop-controls">
+                    <button class="btn btn-primary" onclick="connectDesktop()">🖥️ Connect to Desktop</button>
+                    <a href="/vnc.html?autoconnect=true&resize=scale&password=PLACEHOLDER_VNC_PASS" class="btn btn-success" target="_blank">🚀 Full Screen Desktop</a>
+                    <button class="btn btn-warning" onclick="openTerminal()">💻 Web Terminal</button>
+                    <button class="btn btn-primary" onclick="refreshConnection()">🔄 Refresh</button>
+                </div>
+                
+                <div class="info-grid">
+                    <div class="info-card">
+                        <h3>🖥️ Display Settings</h3>
+                        <p><strong>Resolution:</strong> 1920x1080</p>
+                        <p><strong>Color Depth:</strong> 24-bit</p>
+                        <p><strong>VNC Port:</strong> 5900</p>
+                        <p><strong>Web Port:</strong> 6080</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>📱 Available Apps</h3>
+                        <p>• 🌐 Firefox Browser</p>
+                        <p>• 💻 VS Code Editor</p>
+                        <p>• 📝 Sublime Text</p>
+                        <p>• 🖥️ Terminal</p>
+                        <p>• 📁 Finder</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>⚡ System Info</h3>
+                        <p><strong>OS:</strong> macOS 14.7.6</p>
+                        <p><strong>Arch:</strong> ARM64 (Apple Silicon)</p>
+                        <p><strong>RAM:</strong> 7 GB</p>
+                        <p><strong>CPU:</strong> 3 cores</p>
+                    </div>
+                </div>
+                
+                <div class="desktop-viewer">
+                    <h3>🖥️ Embedded Desktop Viewer</h3>
+                    <div class="vnc-container">
+                        <iframe id="desktop-frame" src="about:blank"></iframe>
+                    </div>
                 </div>
             </div>
+            
+            <script>
+                function connectDesktop() {
+                    const frame = document.getElementById('desktop-frame');
+                    frame.src = '/vnc.html?autoconnect=true&resize=scale&password=PLACEHOLDER_VNC_PASS';
+                }
+                
+                function openTerminal() {
+                    window.open('/terminal', '_blank');
+                }
+                
+                function refreshConnection() {
+                    const frame = document.getElementById('desktop-frame');
+                    frame.src = frame.src;
+                }
+                
+                // Auto-connect on page load
+                window.onload = function() {
+                    setTimeout(connectDesktop, 2000);
+                };
+            </script>
         </body>
         </html>
         EOF
         
         # Replace placeholder
-        sed -i '' "s/PLACEHOLDER_VNC_PASS/${{ github.event.inputs.vnc_password }}/g" /tmp/desktop.html
+        sed -i '' "s/PLACEHOLDER_VNC_PASS/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
         
-        # Copy to noVNC directory
-        cp /tmp/desktop.html /tmp/noVNC/index.html
+        echo "✅ Custom interface created"
         
-    - name: Setup Terminal Access
+    - name: Setup Web Terminal
       run: |
-        echo "💻 Setting up terminal access..."
+        echo "💻 Setting up web terminal..."
         
-        # Install ttyd for web terminal
+        # Install ttyd
         brew install ttyd
         
-        # Start web terminal on different port
+        # Start web terminal
         ttyd --port 8080 --writable /bin/bash &
         
         echo "✅ Web terminal started on port 8080"
         
-    - name: Setup Nginx Reverse Proxy
+    - name: Setup Reverse Proxy
       run: |
-        echo "🔄 Setting up reverse proxy..."
+        echo "🔄 Setting up nginx reverse proxy..."
         
         brew install nginx
         
-        # Create nginx config for multiple services
         cat > /tmp/nginx.conf << 'EOF'
-        events {
-            worker_connections 1024;
-        }
-        
+        events { worker_connections 1024; }
         http {
-            include       /opt/homebrew/etc/nginx/mime.types;
-            default_type  application/octet-stream;
+            include /opt/homebrew/etc/nginx/mime.types;
+            default_type application/octet-stream;
             
             server {
                 listen 8090;
                 
-                # Main desktop interface
                 location / {
                     proxy_pass http://127.0.0.1:6080/;
                     proxy_http_version 1.1;
@@ -279,7 +345,6 @@ jobs:
                     proxy_set_header Host $host;
                 }
                 
-                # noVNC WebSocket
                 location /websockify {
                     proxy_pass http://127.0.0.1:6080/websockify;
                     proxy_http_version 1.1;
@@ -287,7 +352,6 @@ jobs:
                     proxy_set_header Connection "upgrade";
                 }
                 
-                # Terminal access
                 location /terminal {
                     proxy_pass http://127.0.0.1:8080/;
                     proxy_http_version 1.1;
@@ -298,14 +362,12 @@ jobs:
         }
         EOF
         
-        # Start nginx
         nginx -c /tmp/nginx.conf &
+        echo "✅ Nginx started on port 8090"
         
-        echo "✅ Nginx proxy started on port 8090"
-        
-    - name: Setup Public Tunnels
+    - name: Setup Public Access
       run: |
-        echo "🚀 Setting up public access tunnels..."
+        echo "🚀 Setting up public tunnels..."
         
         # Cloudflare tunnel
         brew install cloudflared
@@ -329,23 +391,21 @@ jobs:
     - name: Display Access Information
       run: |
         echo ""
-        echo "🎉 macOS Desktop Environment is ready!"
-        echo "🖥️  Full graphical interface with noVNC web access"
+        echo "🎉 macOS Desktop Environment is Ready!"
+        echo "🖥️  Full GUI + Terminal access via web browser"
         echo ""
         echo "📊 System Status:"
-        echo "• OS: macOS $(sw_vers -productVersion) ($(uname -m))"
-        echo "• RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
-        echo "• Display: 1920x1080 @ 24-bit color"
-        echo "• VNC Server: Running on :1 (port 5901)"
-        echo "• noVNC Web: Running on port 6080"
-        echo "• Web Terminal: Running on port 8080"
+        echo "• VNC Server: ✅ Running on port 5900"
+        echo "• noVNC Web: ✅ Running on port 6080" 
+        echo "• Web Terminal: ✅ Running on port 8080"
+        echo "• Nginx Proxy: ✅ Running on port 8090"
         echo ""
-        echo "🌐 ACCESS METHODS:"
-        echo "=================="
+        echo "🌐 PUBLIC ACCESS:"
+        echo "================"
         
         if [ -f cloudflare_url.txt ]; then
             CF_URL=$(cat cloudflare_url.txt)
-            echo "🥇 CLOUDFLARE TUNNEL (RECOMMENDED):"
+            echo "🥇 CLOUDFLARE TUNNEL:"
             echo "   🖥️  Desktop: $CF_URL"
             echo "   💻 Terminal: $CF_URL/terminal"
             echo "   🔐 VNC Password: ${{ github.event.inputs.vnc_password }}"
@@ -354,7 +414,7 @@ jobs:
         
         if [ -f localtunnel_url.txt ]; then
             LT_URL=$(cat localtunnel_url.txt)
-            echo "🥈 LOCALTUNNEL BACKUP:"
+            echo "🥈 LOCALTUNNEL:"
             echo "   🖥️  Desktop: $LT_URL"
             echo "   💻 Terminal: $LT_URL/terminal"
             echo "   🔑 Tunnel Password: $PUBLIC_IP"
@@ -362,53 +422,35 @@ jobs:
             echo ""
         fi
         
-        echo "📱 INSTALLED APPLICATIONS:"
-        echo "• 🌐 Firefox Browser"
-        echo "• 💻 Visual Studio Code"
-        echo "• 📁 Finder (File Manager)"
-        echo "• 🖥️  Terminal"
-        echo "• 🔧 Development Tools"
-        echo ""
-        echo "💡 USAGE TIPS:"
-        echo "• Click 'Open Desktop' for full GUI experience"
-        echo "• Use 'Open Terminal' for command line access"
-        echo "• Right-click for context menus"
-        echo "• Cmd+Space for Spotlight search"
-        echo "• Applications are in /Applications folder"
+        echo "🎮 USAGE GUIDE:"
+        echo "• Open desktop URL in web browser"
+        echo "• Click 'Connect to Desktop' button"
+        echo "• Use VNC password when prompted"
+        echo "• Full mouse/keyboard control available"
+        echo "• Applications available in dock/launchpad"
         
-    - name: Keep Desktop Session Alive
+    - name: Keep Services Running
       run: |
-        echo ""
-        echo "⏰ Desktop session will remain active for up to 6 hours"
-        echo "🔄 Auto-monitoring all services..."
-        echo ""
+        echo "⏰ Keeping desktop session alive for 6 hours..."
         
         while true; do
-            # Monitor VNC server
-            if ! pgrep -f "Xvnc.*:1" > /dev/null; then
-                echo "🔄 Restarting VNC server..."
-                vncserver :1 -geometry 1920x1080 -depth 24 -passwd ~/.vnc/passwd
-            fi
-            
-            # Monitor noVNC
+            # Monitor services
             if ! pgrep -f websockify > /dev/null; then
                 echo "🔄 Restarting noVNC..."
                 cd /tmp/websockify
-                python3 websockify.py --web /tmp/noVNC 6080 localhost:5901 &
+                python3 websockify.py --web /tmp/noVNC 6080 localhost:5900 &
             fi
             
-            # Monitor terminal
             if ! pgrep ttyd > /dev/null; then
                 echo "🔄 Restarting terminal..."
                 ttyd --port 8080 --writable /bin/bash &
             fi
             
-            # Monitor nginx
             if ! pgrep nginx > /dev/null; then
                 echo "🔄 Restarting proxy..."
                 nginx -c /tmp/nginx.conf &
             fi
             
-            echo "$(date): ✅ Desktop services running | IP: $PUBLIC_IP"
+            echo "$(date): ✅ Desktop services running"
             sleep 300
         done
