@@ -1,4 +1,4 @@
-name: Windows VNC Desktop (Web Access)
+name: Windows VNC Desktop (Web Access) 
 on:
   workflow_dispatch:
     inputs:
