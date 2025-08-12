@@ -1,4 +1,4 @@
-name: macOS VNC Desktop gem
+name: macOS VNC Desktop
 on:
   workflow_dispatch:
     inputs:
@@ -11,22 +11,23 @@ on:
 jobs:
   macos-desktop:
     runs-on: macos-latest
-    timeout-minutes: 350 # GitHub'ın maksimum limiti 360 dakikadır.
+    timeout-minutes: 350
 
     steps:
       - name: 1. Ortamı Hazırla
         run: |
           echo "✅ Ortam hazırlanıyor..."
-          # Gerekli araçları Homebrew ile yükle
           brew install --cask firefox visual-studio-code
           brew install cloudflared ttyd nginx
 
-      - name: 2. macOS Dahili VNC Sunucusunu Etkinleştir
+      - name: 2. macOS Dahili VNC Sunucusunu Etkinleştir (Geliştirilmiş)
         run: |
           echo "🔒 macOS Ekran Paylaşımı (VNC) etkinleştiriliyor..."
           
-          # VNC şifresini ayarla ve sunucuyu başlat. Bu, macOS'un en güvenilir yöntemidir.
-          # Bu komut, tüm kullanıcıların belirtilen şifre ile bağlanmasına izin verir.
+          # Önce mevcut tüm servisleri durdurarak temiz bir başlangıç yap
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -deactivate -stop
+          
+          # VNC şifresini ayarla ve sunucuyu başlat
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on \
             -configure -allowAccessFor -allUsers \
@@ -34,47 +35,38 @@ jobs:
             -configure -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
             -restart -agent -privs -all
 
-          # VNC sunucusunun port 5900'de başladığından emin olmak için kısa bir bekleme
-          sleep 5
+          # Servisin başlaması için daha uzun bekleme süresi
+          echo "VNC servisinin başlaması için 10 saniye bekleniyor..."
+          sleep 10
           
           # VNC sunucusunun çalışıp çalışmadığını kontrol et
           if lsof -i :5900; then
             echo "✅ VNC sunucusu 5900 portunda başarıyla başlatıldı."
           else
-            echo "❌ HATA: VNC sunucusu başlatılamadı."
+            echo "❌ HATA: VNC sunucusu başlatılamadı. Muhtemelen macOS güvenlik (TCC) izinleri nedeniyle."
+            echo "Logları kontrol edin:"
+            ps aux | grep -i "ARD" || echo "ARDAgent çalışmıyor."
             exit 1
           fi
 
       - name: 3. noVNC Web Arayüzünü ve Proxy'yi Ayarla
         run: |
           echo "🌐 noVNC ve Web Proxy ayarları yapılıyor..."
-          
-          # noVNC'yi indir
           git clone https://github.com/novnc/noVNC.git /tmp/noVNC
-          
-          # noVNC'nin VNC sunucusuna (localhost:5900) bağlanmasını sağlayan websockify'ı başlat
-          # Python'un varsayılan olarak yüklü geldiği macOS runner'da websockify'ı doğrudan çalıştırabiliriz.
           /tmp/noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 > /tmp/novnc.log 2>&1 &
-          
-          # Web tabanlı terminal (ttyd) başlat
           ttyd --port 8080 bash > /tmp/ttyd.log 2>&1 &
           
-          # Gelen istekleri doğru servislere yönlendirecek olan Nginx proxy'sini yapılandır
           cat > /tmp/nginx.conf << 'END'
           events {}
           http {
               server {
                   listen 8090;
-                  
-                  # / URL'si noVNC web arayüzüne gider
                   location / {
                       proxy_pass http://127.0.0.1:6080/;
                       proxy_http_version 1.1;
                       proxy_set_header Upgrade $http_upgrade;
                       proxy_set_header Connection "upgrade";
                   }
-
-                  # /terminal URL'si web terminaline gider
                   location /terminal {
                       proxy_pass http://127.0.0.1:8080/;
                       proxy_http_version 1.1;
@@ -84,28 +76,21 @@ jobs:
               }
           }
           END
-          # Nginx'i başlat
-          nginx -c /tmp/nginx.conf
           
+          nginx -c /tmp/nginx.conf
           echo "✅ Web servisleri (noVNC, ttyd, Nginx) çalışıyor."
 
       - name: 4. Herkese Açık Erişim Tüneli Oluştur (Cloudflare)
         run: |
           echo "🚀 Cloudflare Tunnel ile genel erişim sağlanıyor..."
-          
-          # Nginx proxy'mizi (port 8090) internete açmak için Cloudflare Tüneli başlat
           cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared.log 2>&1 &
-          
-          # Tünelin oluşması ve URL'nin log dosyasına yazılması için bekle
           sleep 15
           
-          # Oluşturulan URL'yi yakala ve sonraki adımlarda kullanmak için GITHUB_ENV'e yaz
           CF_URL=$(grep -o 'https://[^[:space:]]*.trycloudflare.com' /tmp/cloudflared.log | head -n 1)
-          
           if [ -z "$CF_URL" ]; then
-              echo "❌ HATA: Cloudflare tünel URL'si alınamadı. Logları kontrol edin:"
-              cat /tmp/cloudflared.log
-              exit 1
+            echo "❌ HATA: Cloudflare tünel URL'si alınamadı."
+            cat /tmp/cloudflared.log
+            exit 1
           fi
           
           echo "CLOUDFLARE_URL=${CF_URL}" >> $GITHUB_ENV
@@ -116,21 +101,14 @@ jobs:
           echo "===================================================================="
           echo "🎉 macOS VNC Masaüstünüz Hazır!"
           echo "===================================================================="
-          echo ""
           echo "🌐 Web Tarayıcınızdan Bağlanın:"
           echo "   Masaüstü: ${{ env.CLOUDFLARE_URL }}"
           echo "   Terminal: ${{ env.CLOUDFLARE_URL }}/terminal"
-          echo ""
           echo "🔐 VNC Şifreniz: ${{ github.event.inputs.vnc_password }}"
-          echo ""
           echo "💡 Not: İlk bağlantıda noVNC arayüzünde 'Connect' butonuna basmanız gerekebilir."
-          echo "   Şifre sorduğunda yukarıdaki şifreyi girin. Kullanıcı adı boş kalabilir."
-          echo ""
           echo "===================================================================="
           
       - name: 6. Oturumu Açık Tut
         run: |
           echo "⏰ Oturum yaklaşık 6 saat boyunca açık kalacak."
-          echo "   Bu adımı sonlandırmak için 'Cancel workflow' butonuna basabilirsiniz."
-          # Servislerin çalışmaya devam etmesi için adımı bitirme
           tail -f /dev/null
