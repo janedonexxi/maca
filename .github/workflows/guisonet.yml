@@ -1,4 +1,5 @@
-name: macOS Desktop with noVNC (Fixed Python)
+---
+name: macOS Desktop with noVNC (VNC Fixed) Sonet son
 on:
   workflow_dispatch:
     inputs:
@@ -60,7 +61,7 @@ jobs:
 
 
           echo "✅ Python environment setup complete"
-      - name: Setup VNC Server
+      - name: Setup VNC Server (Initial)
         run: >
           echo "🔧 Setting up VNC server..."
 
@@ -73,8 +74,42 @@ jobs:
             -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
             -restart -agent -privs -all
 
-          echo "✅ VNC server configured on port 5900"
-      - name: Install noVNC (Alternative Method)
+          echo "✅ VNC server initial setup complete"
+      - name: Fix VNC Authentication Issues
+        run: >
+          echo "🔧 Fixing VNC authentication..."
+
+
+          # Stop current VNC server
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -stop
+
+
+          # Reconfigure VNC with proper settings
+
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }}
+
+          # Enable VNC without username requirement
+
+          sudo defaults write /Library/Preferences/com.apple.RemoteDesktop.plist VNCLegacyConnectionsEnabled -bool true
+
+          sudo defaults write /Library/Preferences/com.apple.VNCSettings.txt Password -string ${{ github.event.inputs.vnc_password }}
+
+
+          # Restart VNC service
+
+          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+          sudo launchctl load /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+
+          echo "✅ VNC authentication fixed - password only mode enabled"
+      - name: Install noVNC Components
         run: |
           echo "🌐 Installing noVNC..."
 
@@ -87,7 +122,7 @@ jobs:
           # Try Homebrew websockify alternative
           brew install websocketd || true
 
-          echo "✅ noVNC installed"
+          echo "✅ noVNC components installed"
       - name: Install Desktop Applications
         run: |
           echo "📱 Installing applications..."
@@ -246,6 +281,13 @@ jobs:
                       margin: 15px 0;
                       border-left: 4px solid #34C759;
                   }
+                  .auth-info {
+                      background: rgba(255, 159, 10, 0.2);
+                      padding: 15px;
+                      border-radius: 10px;
+                      margin: 15px 0;
+                      border-left: 4px solid #FF9F0A;
+                  }
               </style>
           </head>
 
@@ -257,6 +299,9 @@ jobs:
                       <div class="connection-info">
                           <span class="status"></span>
                           <strong>VNC Password:</strong> VNC_PASSWORD_PLACEHOLDER
+                      </div>
+                      <div class="auth-info">
+                          <strong>🔐 Authentication:</strong> Password-only mode (no username required)
                       </div>
                   </div>
                   
@@ -276,6 +321,13 @@ jobs:
                           <p><strong>Protocol:</strong> RFB/VNC</p>
                       </div>
                       <div class="info-card">
+                          <h3>🔐 Connection Guide</h3>
+                          <p><strong>Username:</strong> Leave blank or use 'admin'</p>
+                          <p><strong>Password:</strong> VNC_PASSWORD_PLACEHOLDER</p>
+                          <p><strong>Method:</strong> Password-only authentication</p>
+                          <p><strong>Legacy VNC:</strong> Enabled</p>
+                      </div>
+                      <div class="info-card">
                           <h3>📱 Installed Apps</h3>
                           <p>🌐 Firefox Browser</p>
                           <p>💻 Visual Studio Code</p>
@@ -290,17 +342,11 @@ jobs:
                           <p><strong>RAM:</strong> 7 GB</p>
                           <p><strong>Storage:</strong> SSD</p>
                       </div>
-                      <div class="info-card">
-                          <h3>🔧 Connection Tips</h3>
-                          <p>• Click "Connect Desktop" to start</p>
-                          <p>• Use VNC password when prompted</p>
-                          <p>• Right-click for context menus</p>
-                          <p>• Cmd+Space for Spotlight</p>
-                      </div>
                   </div>
                   
                   <div class="desktop-viewer">
                       <h3>🖥️ Desktop Viewer</h3>
+                      <p><strong>💡 Tip:</strong> If authentication fails, leave username blank and use only password</p>
                       <iframe id="vnc-frame" class="vnc-frame" src="about:blank"></iframe>
                   </div>
               </div>
@@ -331,7 +377,7 @@ jobs:
           sed -i '' "s/VNC_PASSWORD_PLACEHOLDER/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
 
 
-          echo "✅ Enhanced web interface created"
+          echo "✅ Enhanced web interface created with auth guide"
       - name: Setup Web Terminal
         run: |
           echo "💻 Starting web terminal..."
@@ -436,6 +482,18 @@ jobs:
 
           echo ""
 
+          echo "🔐 VNC AUTHENTICATION INFO:"
+
+          echo "• Username: Leave BLANK or use 'admin'"
+
+          echo "• Password: ${{ github.event.inputs.vnc_password }}"
+
+          echo "• Mode: Password-only (no username required)"
+
+          echo "• Legacy VNC: Enabled for compatibility"
+
+          echo ""
+
           echo "🌐 PUBLIC ACCESS URLS:"
 
           echo "====================="
@@ -468,13 +526,15 @@ jobs:
 
           echo "• Click 'Connect Desktop' or 'Full Screen'"
 
-          echo "• Enter VNC password when prompted"
+          echo "• When prompted for credentials:"
+
+          echo "  - Username: LEAVE BLANK or type 'admin'"
+
+          echo "  - Password: ${{ github.event.inputs.vnc_password }}"
 
           echo "• Use mouse/keyboard normally"
 
           echo "• Access applications from dock/launchpad"
-
-          echo "• Terminal available via separate link"
       - name: Keep All Services Running
         run: >
           echo ""
