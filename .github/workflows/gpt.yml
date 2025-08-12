@@ -1,4 +1,4 @@
-name: macOS Web Terminal (ttyd + Cloudflare Tunnel) gpt
+name: macOS Web Terminal (ttyd + Cloudflare Tunnel, fixed input)
 on:
   workflow_dispatch: {}
 
@@ -6,8 +6,6 @@ jobs:
   mac_web_term:
     runs-on: macos-15
     timeout-minutes: 180
-    permissions:
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -17,16 +15,12 @@ jobs:
           brew update
           brew install ttyd cloudflared
 
-      - name: Launch web terminal and expose it
+      - name: Launch web terminal with login shell
         shell: bash
         run: |
-          # 1) Web terminali başlat (ttyd, zsh kabuğu)
-          nohup ttyd -p 7681 /bin/zsh > /tmp/ttyd.log 2>&1 &
-
-          # 2) Cloudflare Quick Tunnel ile herkese açık URL oluştur
+          nohup ttyd --check-origin=false -p 7681 login -fp $(whoami) > /tmp/ttyd.log 2>&1 &
           nohup cloudflared tunnel --url http://localhost:7681 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
 
-          # 3) URL'yi logdan çek ve Summary'ye yaz
           for i in {1..60}; do
             URL=$(grep -oE 'https://[a-zA-Z0-9.-]+trycloudflare.com' /tmp/cloudflared.log | head -n1 || true)
             if [[ -n "$URL" ]]; then
@@ -38,5 +32,4 @@ jobs:
             sleep 2
           done
 
-          # 4) Job'ı canlı tut (terminal açık kalsın)
           tail -f /dev/null
