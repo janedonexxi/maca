@@ -1,313 +1,102 @@
-name: Windows VNC Desktop
+name: Windows VNC Desktop (Web Access)
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: 'VNC Password'
-        required: false
-        default: 'github2024'
+        description: 'VNC şifreniz'
+        required: true
+        default: 'github'
         type: string
 
 jobs:
   windows-desktop:
     runs-on: windows-latest
-    timeout-minutes: 360
-    
+    timeout-minutes: 350
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: System Information
-      run: |
-        Write-Host "🖥️ Windows System Information" -ForegroundColor Green
-        Write-Host "OS: $([System.Environment]::OSVersion.VersionString)"
-        Write-Host "CPU: $((Get-WmiObject Win32_Processor).Name)"
-        Write-Host "RAM: $([math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)) GB"
+      - name: 1. Ortamı ve Uygulamaları Yükle
+        run: |
+          Write-Host "📦 Chocolatey ile uygulamalar yükleniyor..." -ForegroundColor Green
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          choco install tightvnc googlechrome firefox vscode cloudflared -y
+
+      - name: 2. TightVNC Sunucusunu Yapılandır ve Başlat
+        run: |
+          Write-Host "🔧 VNC Sunucusu yapılandırılıyor..." -ForegroundColor Cyan
+          
+          # VNC şifresini ve diğer ayarları registry'e yaz. Bu en güvenilir yöntemdir.
+          $regPath = "HKLM:\SOFTWARE\TightVNC\Server"
+          New-Item -Path $regPath -Force | Out-Null
+          Set-ItemProperty -Path $regPath -Name "Password" -Value (echo "${{ github.event.inputs.vnc_password }}" | C:\"Program Files"\TightVNC\vncpasswd.exe -e)
+          Set-ItemProperty -Path $regPath -Name "PasswordViewOnly" -Value (echo "${{ github.event.inputs.vnc_password }}" | C:\"Program Files"\TightVNC\vncpasswd.exe -e)
+          Set-ItemProperty -Path $regPath -Name "UseVncAuthentication" -Value 1
+          Set-ItemProperty -Path $regPath -Name "AcceptHttpConnections" -Value 0 # noVNC kullanacağımız için dahili web sunucusuna gerek yok
+          Set-ItemProperty -Path $regPath -Name "RfbPort" -Value 5900
+          
+          # VNC Servisini yeniden başlatarak ayarların geçerli olmasını sağla
+          Restart-Service -Name "tvnserver" -Force
+          Write-Host "✅ VNC Sunucusu 5900 portunda başlatıldı." -ForegroundColor Green
+
+      - name: 3. noVNC Web Arayüzünü Ayarla
+        run: |
+          Write-Host "🌐 noVNC ve Websocket proxy ayarlanıyor..." -ForegroundColor Cyan
+          
+          # Gerekli Python paketini ve noVNC'yi indir
+          pip install websockify
+          git clone https://github.com/novnc/noVNC.git C:\noVNC
+          
+          # noVNC'yi arkaplanda çalıştırmak için PowerShell'in 'Start-Job' özelliğini kullan.
+          # Bu, ayrı bir .bat dosyası oluşturmaktan daha temizdir.
+          $ScriptBlock = {
+              & python -m websockify --web C:\noVNC 6080 localhost:5900
+          }
+          Start-Job -ScriptBlock $ScriptBlock
+          
+          Start-Sleep -Seconds 5
+          Write-Host "✅ noVNC web arayüzü 6080 portunda hazır." -ForegroundColor Green
+
+      - name: 4. Herkese Açık Erişim Tüneli Oluştur (Cloudflare)
+        run: |
+          Write-Host "🚀 Cloudflare Tunnel ile genel erişim sağlanıyor..." -ForegroundColor Cyan
+          
+          # Cloudflare tünelini başlat ve logları bir dosyaya yaz
+          Start-Process -FilePath "cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080 --no-autoupdate" -RedirectStandardOutput "C:\cf.log" -RedirectStandardError "C:\cf.log" -NoNewWindow
+          
+          # Tünelin oluşmasını ve URL'nin log dosyasına yazılmasını bekle
+          Write-Host "URL'nin oluşması için 20 saniye bekleniyor..."
+          Start-Sleep -Seconds 20
+          
+          # Log dosyasından tünel URL'sini al
+          $cf_url = Get-Content C:\cf.log | Select-String -Pattern "https://.*trycloudflare.com" | ForEach-Object { $_.Matches[0].Value } | Select-Object -First 1
+          
+          if ($cf_url) {
+              echo "CLOUDFLARE_URL=$cf_url" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              Write-Host "✅ Cloudflare Tüneli Hazır!" -ForegroundColor Green
+          } else {
+              Write-Host "❌ HATA: Cloudflare tünel URL'si alınamadı. Loglar:" -ForegroundColor Red
+              Get-Content C:\cf.log
+              exit 1
+          }
+
+      - name: 5. Erişim Bilgilerini Görüntüle
+        run: |
+          echo "===================================================================="
+          echo "🎉 Windows VNC Masaüstünüz Hazır!"
+          echo "===================================================================="
+          echo ""
+          echo "🌐 Web Tarayıcınızdan Bağlanın:"
+          echo "   Masaüstü: ${{ env.CLOUDFLARE_URL }}"
+          echo ""
+          echo "🔐 VNC Şifreniz: ${{ github.event.inputs.vnc_password }}"
+          echo ""
+          echo "💡 Not: Sayfa açıldığında noVNC arayüzünde 'Connect' butonuna basın ve şifrenizi girin."
+          echo "===================================================================="
         
-        # Get public IP
-        $publicIP = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing).Content
-        Write-Host "Public IP: $publicIP"
-        echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
-        
-    - name: Install Chocolatey Package Manager
-      run: |
-        Write-Host "📦 Installing Chocolatey..." -ForegroundColor Green
-        Set-ExecutionPolicy Bypass -Scope Process -Force
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-        
-    - name: Install VNC Server and Tools
-      run: |
-        Write-Host "🐅 Installing TightVNC Server..." -ForegroundColor Green
-        
-        # Install TightVNC
-        choco install tightvnc -y --params '/Server /Silent'
-        
-        # Install additional tools
-        choco install googlechrome firefox vscode notepadplusplus git nodejs python3 -y
-        
-        Write-Host "✅ Applications installed" -ForegroundColor Green
-        
-    - name: Configure TightVNC Server
-      run: |
-        Write-Host "🔧 Configuring VNC Server..." -ForegroundColor Green
-        
-        # Stop TightVNC service if running
-        Stop-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-        
-        # Configure VNC password using registry
-        $vncPassword = "${{ github.event.inputs.vnc_password }}"
-        
-        # Set VNC password in registry
-        $regPath = "HKLM:\SOFTWARE\TightVNC\Server"
-        New-Item -Path $regPath -Force | Out-Null
-        
-        # Convert password to VNC format (simplified)
-        $key = @(23, 82, 107, 6, 35, 78, 88, 7)
-        $pass = $vncPassword.PadRight(8, [char]0).Substring(0, 8)
-        $encrypted = New-Object byte[] 8
-        
-        for ($i = 0; $i -lt 8; $i++) {
-            $encrypted[$i] = [byte]([byte][char]$pass[$i] -bxor $key[$i])
-        }
-        
-        # Set registry values
-        Set-ItemProperty -Path $regPath -Name "Password" -Value $encrypted
-        Set-ItemProperty -Path $regPath -Name "PasswordViewOnly" -Value $encrypted
-        Set-ItemProperty -Path $regPath -Name "UseVncAuthentication" -Value 1
-        Set-ItemProperty -Path $regPath -Name "AcceptHttpConnections" -Value 1
-        Set-ItemProperty -Path $regPath -Name "HttpPort" -Value 5800
-        Set-ItemProperty -Path $regPath -Name "RfbPort" -Value 5900
-        
-        # Start TightVNC service
-        Start-Service -Name "tvnserver"
-        
-        Write-Host "✅ VNC Server configured and started" -ForegroundColor Green
-        
-    - name: Setup noVNC Web Interface
-      run: |
-        Write-Host "🌐 Setting up noVNC..." -ForegroundColor Green
-        
-        # Clone noVNC
-        git clone https://github.com/novnc/noVNC.git C:\noVNC
-        git clone https://github.com/novnc/websockify.git C:\websockify
-        
-        # Install Python websockify
-        pip install websockify
-        
-        # Create batch file to start websockify
-        @'
-        @echo off
-        cd C:\websockify
-        python websockify.py --web C:\noVNC 6080 localhost:5900
-        '@ | Out-File -FilePath C:\start-novnc.bat -Encoding ASCII
-        
-        # Start websockify in background
-        Start-Process -FilePath "C:\start-novnc.bat" -WindowStyle Hidden
-        
-        Start-Sleep -Seconds 5
-        Write-Host "✅ noVNC started on port 6080" -ForegroundColor Green
-        
-    - name: Create Web Interface
-      run: |
-        Write-Host "🎨 Creating web interface..." -ForegroundColor Green
-        
-        # Create custom index.html
-        @'
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Windows VNC Desktop</title>
-            <meta charset="utf-8">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    background: linear-gradient(135deg, #0078D4 0%, #106EBE 100%);
-                    color: white;
-                    margin: 0;
-                    padding: 20px;
-                }
-                .container {
-                    max-width: 1200px;
-                    margin: 0 auto;
-                    text-align: center;
-                }
-                .header {
-                    background: rgba(255,255,255,0.1);
-                    padding: 30px;
-                    border-radius: 15px;
-                    margin-bottom: 30px;
-                }
-                .auth-info {
-                    background: rgba(40, 167, 69, 0.2);
-                    padding: 20px;
-                    border-radius: 10px;
-                    margin: 20px auto;
-                    max-width: 600px;
-                    border-left: 4px solid #28a745;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 15px 30px;
-                    margin: 10px;
-                    background: #28a745;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    font-weight: bold;
-                }
-                .btn:hover {
-                    background: #218838;
-                }
-                .vnc-frame {
-                    width: 100%;
-                    height: 80vh;
-                    border: none;
-                    border-radius: 10px;
-                    background: black;
-                    margin-top: 20px;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🖥️ Windows VNC Desktop</h1>
-                    <p>GitHub Actions Windows Remote Desktop</p>
-                </div>
-                
-                <div class="auth-info">
-                    <h3>✅ VNC Connection Ready!</h3>
-                    <p><strong>Password:</strong> VNC_PASS_PLACEHOLDER</p>
-                    <p><strong>Note:</strong> No username required, password only</p>
-                </div>
-                
-                <a href="/vnc.html?autoconnect=true&resize=scale&password=VNC_PASS_PLACEHOLDER" class="btn">
-                    🚀 Connect to Desktop
-                </a>
-                
-                <iframe src="/vnc.html?autoconnect=true&resize=scale" class="vnc-frame"></iframe>
-            </div>
-        </body>
-        </html>
-        '@ | Out-File -FilePath C:\noVNC\index.html -Encoding UTF8
-        
-        # Replace password placeholder
-        (Get-Content C:\noVNC\index.html) -replace 'VNC_PASS_PLACEHOLDER', "${{ github.event.inputs.vnc_password }}" | 
-        Set-Content C:\noVNC\index.html
-        
-        Write-Host "✅ Web interface created" -ForegroundColor Green
-        
-    - name: Install ngrok for Public Access
-      run: |
-        Write-Host "🌐 Setting up ngrok..." -ForegroundColor Green
-        
-        # Download ngrok
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip" -OutFile ngrok.zip
-        Expand-Archive ngrok.zip -DestinationPath C:\
-        
-        # Start ngrok
-        Start-Process -FilePath "C:\ngrok.exe" -ArgumentList "http 6080" -WindowStyle Hidden
-        
-        Start-Sleep -Seconds 10
-        
-        # Get ngrok URL
-        try {
-            $ngrokInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
-            $ngrokUrl = $ngrokInfo.tunnels[0].public_url
-            Write-Host "✅ Ngrok URL: $ngrokUrl" -ForegroundColor Green
-            echo "NGROK_URL=$ngrokUrl" >> $env:GITHUB_ENV
-        } catch {
-            Write-Host "⚠️ Ngrok URL not available yet" -ForegroundColor Yellow
-        }
-        
-    - name: Setup Cloudflare Tunnel (Alternative)
-      run: |
-        Write-Host "☁️ Setting up Cloudflare tunnel..." -ForegroundColor Green
-        
-        # Download cloudflared
-        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile cloudflared.exe
-        
-        # Start cloudflared tunnel
-        Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -WindowStyle Hidden -RedirectStandardOutput cf-output.txt
-        
-        Start-Sleep -Seconds 20
-        
-        # Get Cloudflare URL
-        if (Test-Path cf-output.txt) {
-            $cfOutput = Get-Content cf-output.txt -Raw
-            if ($cfOutput -match 'https://[^\s]+\.trycloudflare\.com') {
-                $cfUrl = $matches[0]
-                Write-Host "✅ Cloudflare URL: $cfUrl" -ForegroundColor Green
-                echo "CLOUDFLARE_URL=$cfUrl" >> $env:GITHUB_ENV
-            }
-        }
-        
-    - name: Display Access Information
-      run: |
-        Write-Host ""
-        Write-Host "========================================" -ForegroundColor Cyan
-        Write-Host "🎉 Windows VNC Desktop is Ready!" -ForegroundColor Green
-        Write-Host "========================================" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "📊 Service Status:" -ForegroundColor Yellow
-        
-        # Check services
-        $vncStatus = if (Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue) { "✅ Running" } else { "❌ Not running" }
-        $websockifyStatus = if (Get-Process -Name "python" -ErrorAction SilentlyContinue) { "✅ Running" } else { "❌ Not running" }
-        
-        Write-Host "• VNC Server: $vncStatus"
-        Write-Host "• noVNC Web: $websockifyStatus"
-        Write-Host ""
-        
-        Write-Host "🌐 Access URLs:" -ForegroundColor Yellow
-        
-        if ($env:NGROK_URL) {
-            Write-Host "🥇 Ngrok (Recommended):" -ForegroundColor Green
-            Write-Host "   $env:NGROK_URL"
-        }
-        
-        if ($env:CLOUDFLARE_URL) {
-            Write-Host "🥈 Cloudflare (Backup):" -ForegroundColor Green
-            Write-Host "   $env:CLOUDFLARE_URL"
-        }
-        
-        Write-Host ""
-        Write-Host "🔐 VNC Authentication:" -ForegroundColor Yellow
-        Write-Host "   Password: ${{ github.event.inputs.vnc_password }}"
-        Write-Host "   Username: Not required"
-        Write-Host ""
-        Write-Host "📱 Installed Applications:" -ForegroundColor Yellow
-        Write-Host "• Chrome, Firefox"
-        Write-Host "• VS Code, Notepad++"
-        Write-Host "• Git, Python, Node.js"
-        Write-Host ""
-        Write-Host "💡 This Windows VNC setup WORKS reliably!" -ForegroundColor Green
-        
-    - name: Keep Services Running
-      run: |
-        Write-Host "⏰ Keeping services alive for 6 hours..." -ForegroundColor Green
-        
-        while ($true) {
-            # Check VNC service
-            $vncService = Get-Service -Name "tvnserver" -ErrorAction SilentlyContinue
-            if ($vncService.Status -ne 'Running') {
-                Write-Host "Restarting VNC server..."
-                Start-Service -Name "tvnserver"
-            }
-            
-            # Check websockify
-            if (-not (Get-Process -Name "python" -ErrorAction SilentlyContinue)) {
-                Write-Host "Restarting websockify..."
-                Start-Process -FilePath "C:\start-novnc.bat" -WindowStyle Hidden
-            }
-            
-            # Check ngrok
-            if (-not (Get-Process -Name "ngrok" -ErrorAction SilentlyContinue)) {
-                Write-Host "Restarting ngrok..."
-                Start-Process -FilePath "C:\ngrok.exe" -ArgumentList "http 6080" -WindowStyle Hidden
-            }
-            
-            Write-Host "$(Get-Date): Services checked"
-            Start-Sleep -Seconds 300
-        }
+      - name: 6. Oturumu Açık Tut
+        run: |
+          Write-Host "⏰ Oturum yaklaşık 6 saat boyunca açık kalacak." -ForegroundColor Green
+          while ($true) {
+            Start-Sleep -Seconds 60
+          }
