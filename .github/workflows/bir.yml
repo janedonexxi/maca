@@ -1,61 +1,228 @@
-- name: Setup Multiple Tunnel Options (Fixed) sonnet
-  run: |
-    echo "🚀 Setting up tunnel options..."
+name: macOS Web SSH Access sonet
+on:
+  workflow_dispatch:
+    inputs:
+      session_password:
+        description: 'Web Terminal Password'
+        required: false
+        default: 'github2024'
+        type: string
+
+jobs:
+  macos-web-ssh:
+    runs-on: macos-latest
+    timeout-minutes: 360
     
-    # Method 1: Install bore via Homebrew (more reliable)
-    echo "📦 Installing bore via Homebrew..."
-    brew install bore-cli
-    
-    # Start bore tunnel
-    echo "🔄 Starting bore tunnel..."
-    bore local 8080 --to bore.pub > bore.log 2>&1 &
-    sleep 15
-    
-    # Extract bore URL
-    BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
-    
-    if [ ! -z "$BORE_URL" ]; then
-        echo "🚀 METHOD 1 - Bore.pub:"
-        echo "   URL: http://$BORE_URL"
-        echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-        echo "   ✅ No tunnel password required!"
-        echo "$BORE_URL" > bore_url.txt
-    else
-        echo "⚠️  Bore tunnel failed, trying alternatives..."
-    fi
-    
-    # Method 2: Try cloudflared tunnel
-    echo "🌐 Setting up Cloudflare tunnel as backup..."
-    brew install cloudflared
-    
-    # Start cloudflared tunnel
-    cloudflared tunnel --url http://localhost:8080 > cloudflare.log 2>&1 &
-    sleep 15
-    
-    # Extract cloudflare URL
-    CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' cloudflare.log | head -1)
-    
-    if [ ! -z "$CF_URL" ]; then
-        echo "☁️  METHOD 2 - Cloudflare Tunnel:"
-        echo "   URL: $CF_URL"
-        echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-        echo "   ✅ No tunnel password required!"
-        echo "$CF_URL" > cloudflare_url.txt
-    fi
-    
-    # Method 3: Try ngrok alternative - zrok
-    echo "🔗 Setting up zrok tunnel..."
-    curl -sSLf https://get.openziti.io/tun/install.sh | bash
-    
-    if command -v zrok &> /dev/null; then
-        zrok share public http://localhost:8080 > zrok.log 2>&1 &
-        sleep 10
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Get Public IP and Setup Tools
+      run: |
+        # Get public IP address for localtunnel
+        PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
+        echo "🌐 Runner Public IP: $PUBLIC_IP"
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
         
-        ZROK_URL=$(grep -o 'https://[^[:space:]]*' zrok.log | head -1)
-        if [ ! -z "$ZROK_URL" ]; then
-            echo "🔗 METHOD 3 - Zrok Tunnel:"
-            echo "   URL: $ZROK_URL"
-            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
-            echo "   ✅ No registration required!"
+        # Install required packages
+        brew install ttyd node
+        npm install -g localtunnel
+        
+        echo "✅ Basic tools installed successfully"
+        
+    - name: Start Web Terminal
+      run: |
+        # Start ttyd web terminal on port 8080
+        ttyd \
+          --port 8080 \
+          --credential "admin:${{ github.event.inputs.session_password }}" \
+          /bin/bash &
+        
+        echo "🌐 Web terminal started on port 8080"
+        sleep 5
+        
+    - name: Setup Localtunnel
+      run: |
+        echo "📡 Starting localtunnel..."
+        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > localtunnel.log 2>&1 &
+        sleep 15
+        
+        LOCALTUNNEL_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
+        
+        if [ ! -z "$LOCALTUNNEL_URL" ]; then
+            echo "$LOCALTUNNEL_URL" > localtunnel_url.txt
+            echo "✅ Localtunnel active: $LOCALTUNNEL_URL"
+        else
+            echo "⚠️  Localtunnel failed to start"
         fi
-    fi
+        
+    - name: Setup Serveo Tunnel
+      run: |
+        echo "🔄 Starting serveo.net tunnel..."
+        timeout 20s ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:8080 serveo.net > serveo.log 2>&1 &
+        sleep 15
+        
+        SERVEO_URL=$(grep -o 'https://[^[:space:]]*\.serveo\.net' serveo.log | head -1 2>/dev/null || echo "")
+        
+        if [ ! -z "$SERVEO_URL" ]; then
+            echo "$SERVEO_URL" > serveo_url.txt
+            echo "✅ Serveo tunnel active: $SERVEO_URL"
+        else
+            echo "⚠️  Serveo tunnel failed"
+        fi
+        
+    - name: Setup Cloudflare Tunnel
+      run: |
+        echo "☁️  Installing and starting Cloudflare tunnel..."
+        brew install cloudflared
+        
+        # Start cloudflared tunnel
+        cloudflared tunnel --url http://localhost:8080 > cloudflare.log 2>&1 &
+        sleep 20
+        
+        # Extract cloudflare URL
+        CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' cloudflare.log | head -1)
+        
+        if [ ! -z "$CF_URL" ]; then
+            echo "$CF_URL" > cloudflare_url.txt
+            echo "✅ Cloudflare tunnel active: $CF_URL"
+        else
+            echo "⚠️  Cloudflare tunnel failed"
+        fi
+        
+    - name: Setup Bore Tunnel
+      run: |
+        echo "🚀 Installing bore via Homebrew..."
+        
+        # Try to install bore-cli
+        if brew install bore-cli; then
+            echo "✅ Bore installed successfully"
+            
+            # Start bore tunnel
+            bore local 8080 --to bore.pub > bore.log 2>&1 &
+            sleep 15
+            
+            # Extract bore URL
+            BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
+            
+            if [ ! -z "$BORE_URL" ]; then
+                echo "http://$BORE_URL" > bore_url.txt
+                echo "✅ Bore tunnel active: http://$BORE_URL"
+            else
+                echo "⚠️  Bore tunnel failed to get URL"
+            fi
+        else
+            echo "⚠️  Bore installation failed"
+        fi
+        
+    - name: Display All Access Methods
+      run: |
+        echo ""
+        echo "🎉 macOS Web Terminal is ready!"
+        echo "⚡ System: macOS $(sw_vers -productVersion) ($(uname -m))"
+        echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
+        echo "🌐 Public IP: $PUBLIC_IP"
+        echo ""
+        echo "🔗 AVAILABLE ACCESS METHODS:"
+        echo "================================"
+        
+        # Method 1: Cloudflare (Best option)
+        if [ -f cloudflare_url.txt ] && [ -s cloudflare_url.txt ]; then
+            CF_URL=$(cat cloudflare_url.txt)
+            echo "🥇 METHOD 1 - Cloudflare Tunnel (RECOMMENDED):"
+            echo "   URL: $CF_URL"
+            echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   ✅ No tunnel password required!"
+            echo "   🖥️  Direct terminal: $CF_URL/terminal"
+            echo ""
+        fi
+        
+        # Method 2: Serveo
+        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
+            SERVEO_URL=$(cat serveo_url.txt)
+            echo "🥈 METHOD 2 - Serveo.net:"
+            echo "   URL: $SERVEO_URL"
+            echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   ✅ No tunnel password required!"
+            echo "   🖥️  Direct terminal: $SERVEO_URL/terminal"
+            echo ""
+        fi
+        
+        # Method 3: Bore
+        if [ -f bore_url.txt ] && [ -s bore_url.txt ]; then
+            BORE_URL=$(cat bore_url.txt)
+            echo "🥉 METHOD 3 - Bore.pub:"
+            echo "   URL: $BORE_URL"
+            echo "   👤 Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   ✅ No tunnel password required!"
+            echo "   🖥️  Direct terminal: $BORE_URL/terminal"
+            echo ""
+        fi
+        
+        # Method 4: Localtunnel (requires IP)
+        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
+            LOCALTUNNEL_URL=$(cat localtunnel_url.txt)
+            echo "🔐 METHOD 4 - Localtunnel (Needs IP password):"
+            echo "   URL: $LOCALTUNNEL_URL"
+            echo "   🔑 Tunnel Password: $PUBLIC_IP"
+            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   🖥️  Direct terminal: $LOCALTUNNEL_URL/terminal"
+            echo ""
+        fi
+        
+    - name: Create Usage Instructions
+      run: |
+        echo "📋 QUICK START GUIDE:"
+        echo "===================="
+        echo "1. 🌐 Open any of the URLs above in your web browser"
+        echo "2. 🔐 For Localtunnel: Enter IP password if prompted"
+        echo "3. 👤 Login with: admin / ${{ github.event.inputs.session_password }}"
+        echo "4. 🖥️  Start using your macOS terminal!"
+        echo ""
+        echo "💡 USEFUL COMMANDS:"
+        echo "• System info: neofetch"
+        echo "• Install packages: brew install [package]"
+        echo "• File operations: ls, cd, mkdir, etc."
+        echo "• Git operations: git clone, git pull, etc."
+        echo "• Python: python3 --version"
+        echo "• Node.js: node --version"
+        echo ""
+        echo "🛠️  DEVELOPMENT TOOLS AVAILABLE:"
+        echo "• Homebrew package manager"
+        echo "• Git version control"
+        echo "• Python 3"
+        echo "• Node.js & npm"
+        echo "• Xcode command line tools"
+        echo "• Text editors: vim, nano"
+        
+    - name: Monitor and Keep Alive
+      run: |
+        echo ""
+        echo "⏰ Session will remain active for up to 6 hours"
+        echo "💡 Use 'sudo shutdown -h now' in terminal to end early"
+        echo "🔄 Auto-monitoring services every 5 minutes..."
+        echo ""
+        
+        # Monitor and restart services if needed
+        while true; do
+            # Check ttyd
+            if ! pgrep ttyd > /dev/null; then
+                echo "🔄 Restarting web terminal..."
+                ttyd --port 8080 --credential "admin:${{ github.event.inputs.session_password }}" /bin/bash &
+                sleep 5
+            fi
+            
+            # Check tunnels and restart if needed
+            if ! pgrep -f localtunnel > /dev/null; then
+                echo "🔄 Restarting localtunnel..."
+                npx localtunnel --port 8080 > /dev/null 2>&1 &
+            fi
+            
+            if ! pgrep -f cloudflared > /dev/null; then
+                echo "🔄 Restarting cloudflare tunnel..."
+                cloudflared tunnel --url http://localhost:8080 > /dev/null 2>&1 &
+            fi
+            
+            echo "$(date): ✅ All services running | IP: $PUBLIC_IP"
+            sleep 300  # Check every 5 minutes
+        done
