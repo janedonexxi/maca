@@ -1,4 +1,4 @@
-name: macOS Web SSH Access
+name: macOS Web SSH Access Sonet
 on:
   workflow_dispatch:
     inputs:
