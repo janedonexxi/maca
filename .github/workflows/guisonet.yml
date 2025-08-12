@@ -1,436 +1,136 @@
-name: macOS VNC Desktop Complete opus
+name: macOS VNC Desktop gem
 on:
   workflow_dispatch:
     inputs:
       vnc_password:
-        description: 'VNC Password'
-        required: false
-        default: 'github2024'
+        description: 'VNC şifreniz (en fazla 8 karakter)'
+        required: true
+        default: 'github'
         type: string
 
 jobs:
   macos-desktop:
     runs-on: macos-latest
-    timeout-minutes: 360
-    
+    timeout-minutes: 350 # GitHub'ın maksimum limiti 360 dakikadır.
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: System Setup
-      run: |
-        PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
-        echo "🖥️  macOS $(sw_vers -productVersion) ready"
-        echo "🌐 Public IP: $PUBLIC_IP"
-        
-    - name: Install Desktop Environment
-      run: |
-        echo "📦 Installing desktop environment..."
-        
-        # Install basic tools
-        brew install node python3 ttyd
-        npm install -g localtunnel
-        
-        # Python virtual environment
-        python3 -m venv /tmp/venv
-        source /tmp/venv/bin/activate
-        pip install websockify
-        
-        # Install GUI applications
-        brew install --cask firefox || echo "Firefox already installed"
-        brew install --cask visual-studio-code || echo "VSCode already installed"
-        
-        echo "✅ Desktop environment ready"
-        
-    - name: Install TigerVNC Server
-      run: |
-        echo "🐅 Installing TigerVNC server..."
-        
-        # Install TigerVNC
-        brew install tiger-vnc
-        
-        # Find VNC tools in Homebrew installation
-        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
-        
-        # Create VNC directory
-        mkdir -p ~/.vnc
-        
-        # Create password file using Python (more reliable)
-        python3 << EOF
-        import os
-        password = "${{ github.event.inputs.vnc_password }}"
-        
-        # VNC password encoding
-        key = [23, 82, 107, 6, 35, 78, 88, 7]
-        passwd = password[:8].ljust(8, '\0')
-        encrypted = []
-        for i in range(8):
-            encrypted.append(ord(passwd[i]) ^ key[i])
-        
-        with open(os.path.expanduser('~/.vnc/passwd'), 'wb') as f:
-            f.write(bytes(encrypted))
-        EOF
-        
-        chmod 600 ~/.vnc/passwd
-        
-        # Create VNC startup script
-        cat > ~/.vnc/xstartup << 'EOF'
-        #!/bin/bash
-        export DISPLAY=:1
-        
-        # Start macOS desktop components
-        /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock &
-        /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder &
-        
-        # Keep session alive
-        exec /bin/bash
-        EOF
-        
-        chmod +x ~/.vnc/xstartup
-        
-        # Start TigerVNC server
-        /opt/homebrew/bin/vncserver :1 -geometry 1920x1080 -depth 24 -localhost no || echo "TigerVNC start attempted"
-        
-        echo "✅ TigerVNC setup complete"
-        
-    - name: Setup Alternative VNC
-      run: |
-        echo "🔄 Setting up alternative VNC methods..."
-        
-        # Install and start X11VNC as backup
-        brew install x11vnc || echo "X11VNC install failed"
-        
-        # Start X11VNC on different port
-        if command -v x11vnc >/dev/null 2>&1; then
-            x11vnc -display :0 -passwd ${{ github.event.inputs.vnc_password }} -forever -noxdamage -repeat -rfbport 5902 -nap > /tmp/x11vnc.log 2>&1 &
-            echo "✅ X11VNC started on port 5902"
-        fi
-        
-        # Enable macOS Screen Sharing as last resort
-        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-          -activate -configure -access -on \
-          -configure -allowAccessFor -allUsers \
-          -restart -agent \
-          -clientopts -setvnclegacy -vnclegacy yes \
-          -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
-          -privs -all
-        
-        sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || echo "Screen sharing load attempted"
-        
-        echo "✅ Alternative VNC methods configured"
-        
-    - name: Setup noVNC Web Interface
-      run: |
-        echo "🌐 Setting up noVNC web interface..."
-        
-        # Clone noVNC and websockify
-        git clone https://github.com/novnc/noVNC.git /tmp/noVNC
-        git clone https://github.com/novnc/websockify.git /tmp/websockify
-        
-        # Activate Python environment
-        source /tmp/venv/bin/activate
-        
-        # Wait for VNC servers
-        sleep 10
-        
-        # Check available VNC ports
-        echo "Checking VNC ports..."
-        netstat -an | grep LISTEN | grep 590 || echo "Waiting for VNC ports..."
-        
-        # Try connecting websockify to available VNC port
-        VNC_PORT=""
-        for port in 5901 5902 5900; do
-            if netstat -an | grep ":$port.*LISTEN" > /dev/null; then
-                echo "Found VNC on port $port"
-                VNC_PORT=$port
-                break
-            fi
-        done
-        
-        # Start websockify
-        if [ ! -z "$VNC_PORT" ]; then
-            echo "Starting websockify for port $VNC_PORT..."
-            websockify --web /tmp/noVNC 6080 localhost:$VNC_PORT > /tmp/websockify.log 2>&1 &
-        else
-            echo "No VNC port found, starting websockify on default port 5901..."
-            websockify --web /tmp/noVNC 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
-        fi
-        
-        sleep 5
-        echo "✅ noVNC web interface started"
-        
-    - name: Create VNC Web Interface
-      run: |
-        echo "🎨 Creating VNC web interface..."
-        
-        cat > /tmp/noVNC/index.html << 'ENDHTML'
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>macOS VNC Desktop</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    margin: 0;
-                    padding: 20px;
-                }
-                .container {
-                    max-width: 1200px;
-                    margin: 0 auto;
-                }
-                .header {
-                    text-align: center;
-                    background: rgba(255,255,255,0.1);
-                    padding: 30px;
-                    border-radius: 15px;
-                    margin-bottom: 30px;
-                }
-                .auth-info {
-                    background: rgba(52, 199, 89, 0.2);
-                    padding: 20px;
-                    border-radius: 10px;
-                    margin: 20px auto;
-                    max-width: 600px;
-                }
-                .controls {
-                    text-align: center;
-                    margin: 20px 0;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 15px 30px;
-                    margin: 10px;
-                    background: #007AFF;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 10px;
-                    font-weight: bold;
-                    border: none;
-                    cursor: pointer;
-                    transition: all 0.3s;
-                }
-                .btn:hover {
-                    background: #0056CC;
-                    transform: translateY(-2px);
-                }
-                .btn-success {
-                    background: #34C759;
-                }
-                .btn-warning {
-                    background: #FF9500;
-                }
-                .desktop-viewer {
-                    background: rgba(0,0,0,0.2);
-                    padding: 20px;
-                    border-radius: 15px;
-                    margin: 20px 0;
-                }
-                .vnc-frame {
-                    width: 100%;
-                    height: 70vh;
-                    min-height: 600px;
-                    border: none;
-                    border-radius: 10px;
-                    background: black;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>macOS VNC Desktop</h1>
-                    <p>GitHub Actions Remote Desktop Access</p>
-                </div>
-                
-                <div class="auth-info">
-                    <h3>VNC Authentication</h3>
-                    <p><strong>Password:</strong> VNC_PASS_PLACEHOLDER</p>
-                    <p><strong>Note:</strong> Leave username blank or use any username</p>
-                </div>
-                
-                <div class="controls">
-                    <button class="btn" onclick="connectVNC()">Connect Desktop</button>
-                    <a href="/vnc.html?autoconnect=true&resize=scale" class="btn btn-success" target="_blank">Full Screen</a>
-                    <a href="/terminal" class="btn btn-warning" target="_blank">Terminal</a>
-                </div>
-                
-                <div class="desktop-viewer">
-                    <iframe id="vnc-frame" class="vnc-frame" src="about:blank"></iframe>
-                </div>
-            </div>
-            
-            <script>
-                function connectVNC() {
-                    document.getElementById('vnc-frame').src = '/vnc.html?autoconnect=true&resize=scale';
-                }
-                setTimeout(connectVNC, 3000);
-            </script>
-        </body>
-        </html>
-        ENDHTML
-        
-        # Replace password placeholder
-        sed -i '' "s/VNC_PASS_PLACEHOLDER/${{ github.event.inputs.vnc_password }}/g" /tmp/noVNC/index.html
-        
-        echo "✅ VNC web interface created"
-        
-    - name: Setup Web Terminal
-      run: |
-        echo "💻 Setting up web terminal..."
-        ttyd --port 8080 --writable /bin/bash > /tmp/ttyd.log 2>&1 &
-        echo "✅ Web terminal started"
-        
-    - name: Setup Nginx Proxy
-      run: |
-        echo "🔄 Setting up nginx proxy..."
-        
-        brew install nginx
-        
-        # Create nginx config
-        cat > /tmp/nginx.conf << 'ENDNGINX'
-        events {
-            worker_connections 1024;
-        }
-        
-        http {
-            include /opt/homebrew/etc/nginx/mime.types;
-            default_type application/octet-stream;
-            
-            server {
-                listen 8090;
-                
-                location / {
-                    proxy_pass http://127.0.0.1:6080/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                    proxy_set_header Host $host;
-                }
-                
-                location /websockify {
-                    proxy_pass http://127.0.0.1:6080/websockify;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                }
-                
-                location /terminal {
-                    proxy_pass http://127.0.0.1:8080/;
-                    proxy_http_version 1.1;
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                }
-            }
-        }
-        ENDNGINX
-        
-        # Start nginx
-        nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
-        echo "✅ Nginx proxy started"
-        
-    - name: Setup Public Access
-      run: |
-        echo "🚀 Setting up public access..."
-        
-        # Cloudflare tunnel
-        brew install cloudflared
-        cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflare.log 2>&1 &
-        
-        # Wait for tunnel
-        sleep 25
-        
-        # Get URL
-        CF_URL=$(grep -o 'https://[^[:space:]]*\.trycloudflare\.com' /tmp/cloudflare.log | head -1)
-        if [ ! -z "$CF_URL" ]; then
-            echo "CLOUDFLARE_URL=$CF_URL" >> $GITHUB_ENV
-            echo "✅ Cloudflare tunnel: $CF_URL"
-        fi
-        
-        # Localtunnel backup
-        npx localtunnel --port 8090 > /tmp/localtunnel.log 2>&1 &
-        sleep 15
-        
-        LT_URL=$(grep -o 'https://[^[:space:]]*' /tmp/localtunnel.log | head -1)
-        if [ ! -z "$LT_URL" ]; then
-            echo "LOCALTUNNEL_URL=$LT_URL" >> $GITHUB_ENV
-            echo "✅ Localtunnel: $LT_URL"
-        fi
-        
-    - name: Display Access Information
-      run: |
-        echo ""
-        echo "========================================"
-        echo "🎉 macOS VNC Desktop is Ready!"
-        echo "========================================"
-        echo ""
-        echo "📊 Service Status:"
-        echo "• VNC Server: $(pgrep -f vnc > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-        echo "• noVNC Web: $(pgrep -f websockify > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-        echo "• Web Terminal: $(pgrep ttyd > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-        echo "• Nginx Proxy: $(pgrep nginx > /dev/null && echo '✅ Running' || echo '❌ Not running')"
-        echo ""
-        echo "🌐 Access URLs:"
-        echo "----------------"
-        
-        if [ ! -z "$CLOUDFLARE_URL" ]; then
-            echo "🥇 Cloudflare (Recommended):"
-            echo "   Desktop: $CLOUDFLARE_URL"
-            echo "   Terminal: $CLOUDFLARE_URL/terminal"
-        fi
-        
-        if [ ! -z "$LOCALTUNNEL_URL" ]; then
-            echo ""
-            echo "🥈 Localtunnel (Backup):"
-            echo "   Desktop: $LOCALTUNNEL_URL"
-            echo "   Terminal: $LOCALTUNNEL_URL/terminal"
-            echo "   Tunnel Password: $PUBLIC_IP"
-        fi
-        
-        echo ""
-        echo "🔐 VNC Authentication:"
-        echo "   Password: ${{ github.event.inputs.vnc_password }}"
-        echo "   Username: Leave blank"
-        echo ""
-        echo "💡 Usage Tips:"
-        echo "• Click 'Connect Desktop' to start"
-        echo "• Use password only for authentication"
-        echo "• Full screen mode available"
-        echo "• Terminal access for debugging"
-        
-    - name: Keep Services Running
-      run: |
-        echo ""
-        echo "⏰ Keeping services alive for 6 hours..."
-        echo ""
-        
-        while true; do
-            # Check and restart VNC if needed
-            if ! pgrep -f vnc > /dev/null; then
-                echo "Restarting VNC..."
-                /opt/homebrew/bin/vncserver :1 -geometry 1920x1080 -depth 24 -localhost no 2>/dev/null || true
-            fi
-            
-            # Check and restart websockify
-            if ! pgrep -f websockify > /dev/null; then
-                echo "Restarting websockify..."
-                source /tmp/venv/bin/activate
-                websockify --web /tmp/noVNC 6080 localhost:5901 > /tmp/websockify.log 2>&1 &
-            fi
-            
-            # Check other services
-            if ! pgrep ttyd > /dev/null; then
-                ttyd --port 8080 --writable /bin/bash > /tmp/ttyd.log 2>&1 &
-            fi
-            
-            if ! pgrep nginx > /dev/null; then
-                nginx -c /tmp/nginx.conf > /tmp/nginx.log 2>&1 &
-            fi
-            
-            echo "$(date): Services checked"
-            sleep 300
-        done
+      - name: 1. Ortamı Hazırla
+        run: |
+          echo "✅ Ortam hazırlanıyor..."
+          # Gerekli araçları Homebrew ile yükle
+          brew install --cask firefox visual-studio-code
+          brew install cloudflared ttyd nginx
+
+      - name: 2. macOS Dahili VNC Sunucusunu Etkinleştir
+        run: |
+          echo "🔒 macOS Ekran Paylaşımı (VNC) etkinleştiriliyor..."
+          
+          # VNC şifresini ayarla ve sunucuyu başlat. Bu, macOS'un en güvenilir yöntemidir.
+          # Bu komut, tüm kullanıcıların belirtilen şifre ile bağlanmasına izin verir.
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -clientopts -setvnclegacy -vnclegacy yes \
+            -configure -clientopts -setvncpw -vncpw ${{ github.event.inputs.vnc_password }} \
+            -restart -agent -privs -all
+
+          # VNC sunucusunun port 5900'de başladığından emin olmak için kısa bir bekleme
+          sleep 5
+          
+          # VNC sunucusunun çalışıp çalışmadığını kontrol et
+          if lsof -i :5900; then
+            echo "✅ VNC sunucusu 5900 portunda başarıyla başlatıldı."
+          else
+            echo "❌ HATA: VNC sunucusu başlatılamadı."
+            exit 1
+          fi
+
+      - name: 3. noVNC Web Arayüzünü ve Proxy'yi Ayarla
+        run: |
+          echo "🌐 noVNC ve Web Proxy ayarları yapılıyor..."
+          
+          # noVNC'yi indir
+          git clone https://github.com/novnc/noVNC.git /tmp/noVNC
+          
+          # noVNC'nin VNC sunucusuna (localhost:5900) bağlanmasını sağlayan websockify'ı başlat
+          # Python'un varsayılan olarak yüklü geldiği macOS runner'da websockify'ı doğrudan çalıştırabiliriz.
+          /tmp/noVNC/utils/novnc_proxy --vnc localhost:5900 --listen 6080 > /tmp/novnc.log 2>&1 &
+          
+          # Web tabanlı terminal (ttyd) başlat
+          ttyd --port 8080 bash > /tmp/ttyd.log 2>&1 &
+          
+          # Gelen istekleri doğru servislere yönlendirecek olan Nginx proxy'sini yapılandır
+          cat > /tmp/nginx.conf << 'END'
+          events {}
+          http {
+              server {
+                  listen 8090;
+                  
+                  # / URL'si noVNC web arayüzüne gider
+                  location / {
+                      proxy_pass http://127.0.0.1:6080/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection "upgrade";
+                  }
+
+                  # /terminal URL'si web terminaline gider
+                  location /terminal {
+                      proxy_pass http://127.0.0.1:8080/;
+                      proxy_http_version 1.1;
+                      proxy_set_header Upgrade $http_upgrade;
+                      proxy_set_header Connection "upgrade";
+                  }
+              }
+          }
+          END
+          # Nginx'i başlat
+          nginx -c /tmp/nginx.conf
+          
+          echo "✅ Web servisleri (noVNC, ttyd, Nginx) çalışıyor."
+
+      - name: 4. Herkese Açık Erişim Tüneli Oluştur (Cloudflare)
+        run: |
+          echo "🚀 Cloudflare Tunnel ile genel erişim sağlanıyor..."
+          
+          # Nginx proxy'mizi (port 8090) internete açmak için Cloudflare Tüneli başlat
+          cloudflared tunnel --url http://localhost:8090 > /tmp/cloudflared.log 2>&1 &
+          
+          # Tünelin oluşması ve URL'nin log dosyasına yazılması için bekle
+          sleep 15
+          
+          # Oluşturulan URL'yi yakala ve sonraki adımlarda kullanmak için GITHUB_ENV'e yaz
+          CF_URL=$(grep -o 'https://[^[:space:]]*.trycloudflare.com' /tmp/cloudflared.log | head -n 1)
+          
+          if [ -z "$CF_URL" ]; then
+              echo "❌ HATA: Cloudflare tünel URL'si alınamadı. Logları kontrol edin:"
+              cat /tmp/cloudflared.log
+              exit 1
+          fi
+          
+          echo "CLOUDFLARE_URL=${CF_URL}" >> $GITHUB_ENV
+          echo "✅ Cloudflare Tüneli hazır."
+
+      - name: 5. Erişim Bilgilerini Görüntüle
+        run: |
+          echo "===================================================================="
+          echo "🎉 macOS VNC Masaüstünüz Hazır!"
+          echo "===================================================================="
+          echo ""
+          echo "🌐 Web Tarayıcınızdan Bağlanın:"
+          echo "   Masaüstü: ${{ env.CLOUDFLARE_URL }}"
+          echo "   Terminal: ${{ env.CLOUDFLARE_URL }}/terminal"
+          echo ""
+          echo "🔐 VNC Şifreniz: ${{ github.event.inputs.vnc_password }}"
+          echo ""
+          echo "💡 Not: İlk bağlantıda noVNC arayüzünde 'Connect' butonuna basmanız gerekebilir."
+          echo "   Şifre sorduğunda yukarıdaki şifreyi girin. Kullanıcı adı boş kalabilir."
+          echo ""
+          echo "===================================================================="
+          
+      - name: 6. Oturumu Açık Tut
+        run: |
+          echo "⏰ Oturum yaklaşık 6 saat boyunca açık kalacak."
+          echo "   Bu adımı sonlandırmak için 'Cancel workflow' butonuna basabilirsiniz."
+          # Servislerin çalışmaya devam etmesi için adımı bitirme
+          tail -f /dev/null
