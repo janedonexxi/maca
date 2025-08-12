@@ -1,0 +1,230 @@
+name: macOS Web SSH Access Sonnet
+on:
+  workflow_dispatch:
+    inputs:
+      session_password:
+        description: 'Web Terminal Password'
+        required: false
+        default: 'github2024'
+        type: string
+
+jobs:
+  macos-web-ssh:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Web Terminal Environment
+      run: |
+        # Install required packages
+        brew install ttyd
+        brew install node
+        
+        # Install localtunnel globally
+        npm install -g localtunnel
+        
+        echo "✅ Web terminal tools installed"
+        
+    - name: Configure System
+      run: |
+        # Get system information
+        echo "🖥️  System Information:"
+        echo "macOS Version: $(sw_vers -productVersion)"
+        echo "Architecture: $(uname -m)"
+        echo "Hostname: $(hostname)"
+        echo "User: $(whoami)"
+        echo "Home: $HOME"
+        
+        # Install additional useful tools
+        brew install htop curl wget git vim nano
+        
+    - name: Start Web Terminal
+      run: |
+        # Create a simple authentication wrapper
+        cat > /tmp/auth_wrapper.sh << 'EOF'
+        #!/bin/bash
+        echo "🔐 Web Terminal Authentication"
+        echo "Password: $1"
+        if [ "$1" = "$SESSION_PASSWORD" ]; then
+            exec /bin/bash
+        else
+            echo "❌ Invalid password"
+            exit 1
+        fi
+        EOF
+        
+        chmod +x /tmp/auth_wrapper.sh
+        
+        # Start ttyd web terminal on port 8080
+        SESSION_PASSWORD="${{ github.event.inputs.session_password }}" ttyd \
+          --port 8080 \
+          --credential "admin:${{ github.event.inputs.session_password }}" \
+          --index /tmp/index.html \
+          /bin/bash &
+        
+        echo "🌐 Web terminal started on port 8080"
+        sleep 5
+        
+    - name: Create Custom Web Interface
+      run: |
+        # Create a custom index page
+        cat > /tmp/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>GitHub Actions macOS Terminal</title>
+            <meta charset="utf-8">
+            <style>
+                body { 
+                    font-family: 'Monaco', 'Menlo', monospace; 
+                    background: #1e1e1e; 
+                    color: #fff; 
+                    margin: 0; 
+                    padding: 20px;
+                }
+                .header {
+                    background: #2d2d2d;
+                    padding: 15px;
+                    border-radius: 8px;
+                    margin-bottom: 20px;
+                    text-align: center;
+                }
+                .info {
+                    background: #0d1117;
+                    padding: 15px;
+                    border-radius: 8px;
+                    margin-bottom: 20px;
+                    border-left: 4px solid #58a6ff;
+                }
+                .terminal-link {
+                    display: inline-block;
+                    background: #238636;
+                    color: white;
+                    padding: 12px 24px;
+                    text-decoration: none;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    margin: 10px;
+                }
+                .terminal-link:hover {
+                    background: #2ea043;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🍎 GitHub Actions macOS Terminal</h1>
+                <p>Web-based SSH access to macOS runner</p>
+            </div>
+            
+            <div class="info">
+                <h3>📋 Connection Information:</h3>
+                <p><strong>Username:</strong> admin</p>
+                <p><strong>Password:</strong> ${{ github.event.inputs.session_password }}</p>
+                <p><strong>Session Duration:</strong> Up to 6 hours</p>
+            </div>
+            
+            <div style="text-align: center;">
+                <a href="/terminal" class="terminal-link">🖥️ Open Terminal</a>
+            </div>
+            
+            <div class="info">
+                <h3>💡 Usage Tips:</h3>
+                <ul>
+                    <li>Use standard Unix/macOS commands</li>
+                    <li>Install packages with: <code>brew install package-name</code></li>
+                    <li>Access files in: <code>/Users/runner/work/</code></li>
+                    <li>Use <code>sudo</code> for admin operations</li>
+                </ul>
+            </div>
+        </body>
+        </html>
+        EOF
+        
+    - name: Setup Public Tunnel
+      run: |
+        # Start localtunnel to expose port 8080
+        echo "🚀 Creating public tunnel..."
+        
+        # Start localtunnel in background
+        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > tunnel.log 2>&1 &
+        
+        # Wait for tunnel to establish
+        sleep 10
+        
+        # Extract tunnel URL
+        TUNNEL_URL=$(grep -o 'https://[^[:space:]]*' tunnel.log | head -1)
+        
+        if [ -z "$TUNNEL_URL" ]; then
+            # Fallback: try without custom subdomain
+            pkill -f localtunnel
+            npx localtunnel --port 8080 > tunnel.log 2>&1 &
+            sleep 10
+            TUNNEL_URL=$(grep -o 'https://[^[:space:]]*' tunnel.log | head -1)
+        fi
+        
+        echo "🌍 Public URL: $TUNNEL_URL"
+        echo "$TUNNEL_URL" > public_url.txt
+        
+    - name: Display Access Information
+      run: |
+        echo "🎉 macOS Web Terminal is ready!"
+        echo ""
+        echo "🔗 Access your macOS terminal via web browser:"
+        
+        if [ -f public_url.txt ]; then
+            PUBLIC_URL=$(cat public_url.txt)
+            echo "   $PUBLIC_URL"
+            echo ""
+            echo "🔐 Login Credentials:"
+            echo "   Username: admin"
+            echo "   Password: ${{ github.event.inputs.session_password }}"
+        else
+            echo "   ❌ Failed to create public tunnel"
+            echo "   🔧 Troubleshooting: Check the logs above"
+        fi
+        
+        echo ""
+        echo "📱 Direct Terminal Access:"
+        if [ -f public_url.txt ]; then
+            echo "   $(cat public_url.txt)/terminal"
+        fi
+        
+        echo ""
+        echo "⚡ System Status:"
+        echo "   OS: macOS $(sw_vers -productVersion)"
+        echo "   Architecture: $(uname -m)"
+        echo "   Available RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}')"
+        echo "   CPU Cores: $(sysctl -n hw.ncpu)"
+        
+    - name: Keep Session Alive
+      run: |
+        echo "⏰ Web terminal session will remain active..."
+        echo "🔄 Session will auto-terminate after 6 hours"
+        echo "💡 Use 'sudo shutdown -h now' in terminal to end early"
+        echo ""
+        
+        # Monitor and keep alive
+        while true; do
+            # Check if ttyd is still running
+            if ! pgrep ttyd > /dev/null; then
+                echo "❌ Web terminal process died, restarting..."
+                SESSION_PASSWORD="${{ github.event.inputs.session_password }}" ttyd \
+                  --port 8080 \
+                  --credential "admin:${{ github.event.inputs.session_password }}" \
+                  /bin/bash &
+            fi
+            
+            # Check if localtunnel is still running
+            if ! pgrep -f localtunnel > /dev/null; then
+                echo "🔄 Tunnel disconnected, reconnecting..."
+                npx localtunnel --port 8080 > tunnel.log 2>&1 &
+                sleep 5
+            fi
+            
+            echo "$(date): ✅ Web terminal is running..."
+            sleep 300  # Check every 5 minutes
+        done
