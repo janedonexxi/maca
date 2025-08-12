@@ -1,4 +1,4 @@
-name: macOS Web SSH Access (Fixed) Sonnet
+name: macOS Web SSH Access
 on:
   workflow_dispatch:
     inputs:
@@ -17,20 +17,22 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Get Public IP and Setup
+    - name: Get Public IP and Setup Tools
       run: |
-        # Get public IP address
+        # Get public IP address for localtunnel
         PUBLIC_IP=$(curl -s https://ipinfo.io/ip)
-        echo "🌐 Public IP: $PUBLIC_IP"
+        echo "🌐 Runner Public IP: $PUBLIC_IP"
         echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
         
         # Install required packages
         brew install ttyd node
         npm install -g localtunnel
         
+        echo "✅ Tools installed successfully"
+        
     - name: Start Web Terminal
       run: |
-        # Start ttyd web terminal
+        # Start ttyd web terminal on port 8080
         ttyd \
           --port 8080 \
           --credential "admin:${{ github.event.inputs.session_password }}" \
@@ -39,100 +41,117 @@ jobs:
         echo "🌐 Web terminal started on port 8080"
         sleep 5
         
-    - name: Setup Public Tunnel with IP Password
+    - name: Create Multiple Tunnel Options
       run: |
-        # Start localtunnel with custom subdomain
-        echo "🚀 Creating public tunnel..."
+        echo "🚀 Setting up multiple tunnel options..."
         
-        # Use public IP as tunnel password
-        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > tunnel.log 2>&1 &
-        
-        sleep 15
-        
-        # Extract tunnel URL
-        TUNNEL_URL=$(grep -o 'https://[^[:space:]]*' tunnel.log | head -1)
-        
-        if [ -z "$TUNNEL_URL" ]; then
-            # Fallback without subdomain
-            pkill -f localtunnel
-            npx localtunnel --port 8080 > tunnel.log 2>&1 &
-            sleep 15
-            TUNNEL_URL=$(grep -o 'https://[^[:space:]]*' tunnel.log | head -1)
-        fi
-        
-        echo "🌍 Tunnel URL: $TUNNEL_URL"
-        echo "$TUNNEL_URL" > public_url.txt
-        
-    - name: Display Complete Access Information
-      run: |
-        echo "🎉 macOS Web Terminal is ready!"
-        echo ""
-        echo "🔗 Access Steps:"
-        echo "1. Open this URL in your browser:"
-        
-        if [ -f public_url.txt ]; then
-            PUBLIC_URL=$(cat public_url.txt)
-            echo "   $PUBLIC_URL"
-            echo ""
-            echo "2. 🔐 Localtunnel Security Page:"
-            echo "   Tunnel Password: $PUBLIC_IP"
-            echo "   (This is the runner's public IP address)"
-            echo ""
-            echo "3. 🖥️ Web Terminal Login:"
-            echo "   Username: admin"
-            echo "   Password: ${{ github.event.inputs.session_password }}"
-            echo ""
-            echo "4. 📱 Direct Terminal Access (after tunnel auth):"
-            echo "   $PUBLIC_URL/terminal"
-        else
-            echo "   ❌ Failed to create public tunnel"
-        fi
-        
-        echo ""
-        echo "⚡ System Information:"
-        echo "   OS: macOS $(sw_vers -productVersion)"
-        echo "   Architecture: $(uname -m)"
-        echo "   Public IP: $PUBLIC_IP"
-        echo "   RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}')"
-        echo "   CPU: $(sysctl -n hw.ncpu) cores"
-        
-    - name: Alternative: Use serveo.net (No IP required)
-      run: |
-        echo ""
-        echo "🔄 Alternative Access Method (No IP password needed):"
-        echo "Setting up serveo.net tunnel..."
-        
-        # Kill existing localtunnel
-        pkill -f localtunnel || true
-        
-        # Use serveo.net as alternative
-        ssh -o StrictHostKeyChecking=no -R 80:localhost:8080 serveo.net > serveo.log 2>&1 &
-        
+        # Option 1: Localtunnel (requires IP password)
+        echo "📡 Starting localtunnel..."
+        npx localtunnel --port 8080 --subdomain github-macos-$(date +%s) > localtunnel.log 2>&1 &
         sleep 10
         
-        # Extract serveo URL
-        SERVEO_URL=$(grep -o 'https://[^[:space:]]*\.serveo\.net' serveo.log | head -1)
+        LOCALTUNNEL_URL=$(grep -o 'https://[^[:space:]]*' localtunnel.log | head -1)
         
-        if [ ! -z "$SERVEO_URL" ]; then
-            echo "🌟 Alternative URL (No password needed): $SERVEO_URL"
-            echo "🖥️ Direct terminal: $SERVEO_URL/terminal"
+        # Option 2: Try serveo.net (no password needed)
+        echo "🔄 Starting serveo.net tunnel..."
+        timeout 15s ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -R 80:localhost:8080 serveo.net > serveo.log 2>&1 &
+        sleep 10
+        
+        SERVEO_URL=$(grep -o 'https://[^[:space:]]*\.serveo\.net' serveo.log | head -1 2>/dev/null || echo "")
+        
+        # Save URLs
+        echo "$LOCALTUNNEL_URL" > localtunnel_url.txt
+        echo "$SERVEO_URL" > serveo_url.txt
+        
+    - name: Display All Access Methods
+      run: |
+        echo "🎉 macOS Web Terminal is ready!"
+        echo "⚡ System: macOS $(sw_vers -productVersion) ($(uname -m))"
+        echo "💾 RAM: $(sysctl -n hw.memsize | awk '{print $1/1024/1024/1024 " GB"}') | CPU: $(sysctl -n hw.ncpu) cores"
+        echo ""
+        
+        # Method 1: Localtunnel
+        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
+            LOCALTUNNEL_URL=$(cat localtunnel_url.txt)
+            echo "🔗 METHOD 1 - Localtunnel:"
+            echo "   URL: $LOCALTUNNEL_URL"
+            echo "   🔐 Tunnel Password: $PUBLIC_IP"
+            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
             echo ""
-            echo "✅ This URL works immediately without any password!"
         fi
+        
+        # Method 2: Serveo.net
+        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
+            SERVEO_URL=$(cat serveo_url.txt)
+            echo "🌟 METHOD 2 - Serveo.net (RECOMMENDED - No tunnel password!):"
+            echo "   URL: $SERVEO_URL"
+            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   ✅ Direct access - no tunnel password needed!"
+            echo ""
+        fi
+        
+        # Method 3: Backup using bore.pub
+        echo "🔄 METHOD 3 - Setting up bore.pub as backup..."
+        
+    - name: Setup Bore Tunnel as Backup
+      run: |
+        # Install and use bore.pub as third option
+        curl -L https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-apple-darwin.tar.gz -o bore.tar.gz 2>/dev/null || curl -L https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-aarch64-apple-darwin.tar.gz -o bore.tar.gz
+        tar -xzf bore.tar.gz
+        chmod +x bore
+        
+        # Start bore tunnel
+        ./bore local 8080 --to bore.pub > bore.log 2>&1 &
+        sleep 10
+        
+        BORE_URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
+        
+        if [ ! -z "$BORE_URL" ]; then
+            echo "🚀 METHOD 3 - Bore.pub:"
+            echo "   URL: http://$BORE_URL"
+            echo "   👤 Terminal Login: admin / ${{ github.event.inputs.session_password }}"
+            echo "   ✅ No tunnel password required!"
+        fi
+        
+    - name: Final Access Summary
+      run: |
+        echo ""
+        echo "📋 QUICK ACCESS SUMMARY:"
+        echo "========================"
+        
+        # Show all available methods
+        if [ -f serveo_url.txt ] && [ -s serveo_url.txt ]; then
+            echo "🥇 BEST OPTION (No passwords):"
+            echo "   $(cat serveo_url.txt)"
+        fi
+        
+        if [ -f localtunnel_url.txt ] && [ -s localtunnel_url.txt ]; then
+            echo ""
+            echo "🥈 ALTERNATIVE (Needs IP password):"
+            echo "   $(cat localtunnel_url.txt)"
+            echo "   Password: $PUBLIC_IP"
+        fi
+        
+        echo ""
+        echo "🔐 Web Terminal Credentials (for all methods):"
+        echo "   Username: admin"
+        echo "   Password: ${{ github.event.inputs.session_password }}"
         
     - name: Keep Session Alive
       run: |
+        echo ""
         echo "⏰ Session will remain active for up to 6 hours"
-        echo "💡 Use 'sudo shutdown -h now' to terminate early"
+        echo "💡 Use 'sudo shutdown -h now' in terminal to end early"
         echo ""
         
+        # Monitor and restart services if needed
         while true; do
-            # Keep ttyd running
+            # Check ttyd
             if ! pgrep ttyd > /dev/null; then
                 echo "🔄 Restarting web terminal..."
                 ttyd --port 8080 --credential "admin:${{ github.event.inputs.session_password }}" /bin/bash &
             fi
             
-            echo "$(date): ✅ Services running - IP: $PUBLIC_IP"
-            sleep 300
+            echo "$(date): ✅ Web terminal active | IP: $PUBLIC_IP"
+            sleep 300  # Check every 5 minutes
         done
