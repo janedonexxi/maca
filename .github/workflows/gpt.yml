@@ -1,0 +1,42 @@
+name: Mac Runner - Web SSH (tmate)
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: mac-web-ssh
+  cancel-in-progress: true
+
+jobs:
+  mac_web_ssh:
+    # macos-latest Ağustos 2025'te kademeli olarak macOS 15'e taşınıyor; netlik için doğrudan macos-15 kullanıyoruz.
+    runs-on: macos-15
+    timeout-minutes: 240
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # tmate oturumunu başlatır; hem SSH hem de WEB terminal bağlantısı üretir.
+      - name: Start tmate session (SSH + Web)
+        id: tmate
+        uses: mxschmitt/action-tmate@v3
+        timeout-minutes: 180
+        with:
+          # Bağlantıları step çıktısı olarak almak için "detached" mod.
+          detached: true
+          # Herkese açık istiyorsan actor'a kilitleme. (Varsayılan da kilitlemez;
+          # hesabında SSH anahtarı varsa tmate sadece o anahtara izin verir — Notlara bak.)
+          limit-access-to-actor: false
+
+      # Bağlantıları Job Summary'ye yaz (tıklanabilir kısa özet).
+      - name: Publish connection links
+        if: ${{ always() }}
+        run: |
+          echo "### tmate bağlantıları" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SSH**: \`${{ steps.tmate.outputs.ssh-command }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Web terminal**: ${{ steps.tmate.outputs.web-url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> Oturum, workflow bitene veya süre dolana kadar açık kalır." >> "$GITHUB_STEP_SUMMARY"
